@@ -333,8 +333,9 @@ class CsvToDatabaseView(SimpleFormView):
                 filename = secure_filename(csv_file.filename)
                 csv_file.save(os.path.join(config['UPLOAD_FOLDER'], filename))
                 return filename
-
+        form.csv_file.data.filename = secure_filename(form.csv_file.data.filename + '.' +str(datetime.today())[:-7])
         csv_file = form.csv_file.data
+        csv_file.filename = secure_filename(csv_file.filename)
         _upload_file(csv_file)
         table = SqlaTable(table_name=form.name.data)
         database = (

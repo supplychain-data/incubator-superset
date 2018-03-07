@@ -751,6 +751,34 @@ class PrestoEngineSpec(BaseEngineSpec):
             return ''
         return df.to_dict()[field_to_return][0]
 
+import requests
+def make_httpfs_url(host, user, hdfs_path, op, port=14000):
+    url = 'http://' + user + '@' + host + ':' + str(port) + '/webhdfs/v1'
+    url += hdfs_path + '?user.name=' + user + '&op=' + op
+
+    return url
+
+
+
+def hdfsput(host, user, hdfs_path, filename, port=50070, perms=775):
+    # Get the file name without base path.
+    filename_short = filename.split('/')[-1]
+    # Form the URL.
+    url = make_httpfs_url(
+        host=host,
+        user=user,
+        hdfs_path=hdfs_path + '/' + filename_short,
+        op='CREATE&data=true&overwrite=true&permission=' + str(perms),
+        port=port
+    )
+    headers = {
+        'Content-Type': 'application/octet-stream'
+    }
+    # files = {'file': open(filename,'rb')}
+
+    resp = requests.put(url, data=open(filename, 'rb'), headers=headers)
+    if resp.status_code != 200:
+        resp.raise_for_status()
 
 class HiveEngineSpec(PrestoEngineSpec):
 
@@ -806,9 +834,9 @@ class HiveEngineSpec(PrestoEngineSpec):
         table_name = form.name.data
         filename = form.csv_file.data.filename
 
-        bucket_path = app.config['CSV_TO_HIVE_UPLOAD_BUCKET']
+        hdfs_path = app.config['CSV_TO_HIVE_UPLOAD_PATH'] + '/' + table_name
 
-        if not bucket_path:
+        if not hdfs_path:
             logging.info('No upload bucket specified')
             raise Exception(
                 'No upload bucket specified. You can specify one in the config file.')
@@ -822,18 +850,19 @@ class HiveEngineSpec(PrestoEngineSpec):
         schema_definition = ', '.join(
             [s + ' STRING ' for s in column_names])
 
-        s3 = boto3.client('s3')
-        location = os.path.join('s3a://', bucket_path, upload_prefix, table_name)
-        s3.upload_file(
-            upload_path, 'airbnb-superset',
-            os.path.join(upload_prefix, table_name, filename))
-        sql = """CREATE EXTERNAL TABLE {table_name} ( {schema_definition} )
-            ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS
-            TEXTFILE LOCATION '{location}'""".format(**locals())
-
-        logging.info(form.con.data)
-        engine = create_engine(form.con.data)
-        engine.execute(sql)
+        # s3 = boto3.client('s3')
+        # location = os.path.join('s3a://', bucket_path, upload_prefix, table_name)
+        # s3.upload_file(
+        #     upload_path, 'airbnb-superset',
+        #     os.path.join(upload_prefix, table_name, filename))
+        # sql = """CREATE EXTERNAL TABLE {table_name} ( {schema_definition} )
+        #     ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS
+        #     TEXTFILE LOCATION '{location}'""".format(**locals())
+        hdfsput(host='hd-master1.p2p.lt', user='supplychain', hdfs_path=hdfs_path,
+                 filename=upload_path, port=50070)
+        #logging.info(form.con.data)
+        #engine = create_engine(form.con.data)
+        #engine.execute(sql)
 
     @classmethod
     def convert_dttm(cls, target_type, dttm):

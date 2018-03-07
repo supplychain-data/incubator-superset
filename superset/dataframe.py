@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 from pandas.core.common import _maybe_box_datetimelike
 from pandas.core.dtypes.dtypes import ExtensionDtype
+from pandas._libs.tslib import OutOfBoundsDatetime
 from past.builtins import basestring
 
 
@@ -41,7 +42,7 @@ class SupersetDataFrame(object):
     }
 
     def __init__(self, df):
-        self.__df = df.where((pd.notnull(df)), None)
+        self.__df = df.where((pd.notnull(df)), None,errors='ignore',raise_on_error=False)
 
     @property
     def size(self):
@@ -50,7 +51,13 @@ class SupersetDataFrame(object):
     @property
     def data(self):
         # work around for https://github.com/pandas-dev/pandas/issues/18372
-        return [dict((k, _maybe_box_datetimelike(v))
+        def maybe_box_datetimelike(v):
+            try:
+                re=_maybe_box_datetimelike(v)
+            except OutOfBoundsDatetime:
+                re=v
+            return re
+	return [dict((k, maybe_box_datetimelike(v))
                      for k, v in zip(self.__df.columns, np.atleast_1d(row)))
                 for row in self.__df.values]
 
