@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Utility functions used across Superset"""
 from __future__ import absolute_import
 from __future__ import division
@@ -21,6 +22,7 @@ import sys
 import uuid
 import zlib
 
+import bleach
 import celery
 from dateutil.parser import parse
 from flask import flash, Markup, redirect, render_template, request, url_for
@@ -34,6 +36,7 @@ from flask_babel import gettext as __
 from flask_cache import Cache
 import markdown as md
 import numpy
+import pandas as pd
 import parsedatetime
 from past.builtins import basestring
 from pydruid.utils.having import Having
@@ -42,35 +45,14 @@ import sqlalchemy as sa
 from sqlalchemy import event, exc, select
 from sqlalchemy.types import TEXT, TypeDecorator
 
+from superset.exceptions import SupersetException, SupersetTimeoutException
+
+
 logging.getLogger('MARKDOWN').setLevel(logging.INFO)
 
 PY3K = sys.version_info >= (3, 0)
 EPOCH = datetime(1970, 1, 1)
 DTTM_ALIAS = '__timestamp'
-
-
-class SupersetException(Exception):
-    pass
-
-
-class SupersetTimeoutException(SupersetException):
-    pass
-
-
-class SupersetSecurityException(SupersetException):
-    pass
-
-
-class MetricPermException(SupersetException):
-    pass
-
-
-class NoDataException(SupersetException):
-    pass
-
-
-class SupersetTemplateException(SupersetException):
-    pass
 
 
 def can_access(sm, permission_name, view_name, user):
@@ -91,36 +73,56 @@ def flasher(msg, severity=None):
             logging.info(msg)
 
 
-class memoized(object):  # noqa
+class _memoized(object):  # noqa
     """Decorator that caches a function's return value each time it is called
 
     If called later with the same arguments, the cached value is returned, and
     not re-evaluated.
+
+    Define ``watch`` as a tuple of attribute names if this Decorator
+    should account for instance variable changes.
     """
 
-    def __init__(self, func):
+    def __init__(self, func, watch=()):
         self.func = func
         self.cache = {}
+        self.is_method = False
+        self.watch = watch
 
-    def __call__(self, *args):
+    def __call__(self, *args, **kwargs):
+        key = [args, frozenset(kwargs.items())]
+        if self.is_method:
+            key.append(tuple([getattr(args[0], v, None) for v in self.watch]))
+        key = tuple(key)
+        if key in self.cache:
+            return self.cache[key]
         try:
-            return self.cache[args]
-        except KeyError:
-            value = self.func(*args)
-            self.cache[args] = value
+            value = self.func(*args, **kwargs)
+            self.cache[key] = value
             return value
         except TypeError:
             # uncachable -- for instance, passing a list as an argument.
             # Better to not cache than to blow up entirely.
-            return self.func(*args)
+            return self.func(*args, **kwargs)
 
     def __repr__(self):
         """Return the function's docstring."""
         return self.func.__doc__
 
     def __get__(self, obj, objtype):
+        if not self.is_method:
+            self.is_method = True
         """Support instance methods."""
         return functools.partial(self.__call__, obj)
+
+
+def memoized(func=None, watch=None):
+    if func:
+        return _memoized(func)
+    else:
+        def wrapper(f):
+            return _memoized(f, watch)
+        return wrapper
 
 
 def js_string_to_python(item):
@@ -220,6 +222,55 @@ def dttm_from_timtuple(d):
         d.tm_year, d.tm_mon, d.tm_mday, d.tm_hour, d.tm_min, d.tm_sec)
 
 
+def decode_dashboards(o):
+    """
+    Function to be passed into json.loads obj_hook parameter
+    Recreates the dashboard object from a json representation.
+    """
+    import superset.models.core as models
+    from superset.connectors.sqla.models import (
+        SqlaTable, SqlMetric, TableColumn,
+    )
+
+    if '__Dashboard__' in o:
+        d = models.Dashboard()
+        d.__dict__.update(o['__Dashboard__'])
+        return d
+    elif '__Slice__' in o:
+        d = models.Slice()
+        d.__dict__.update(o['__Slice__'])
+        return d
+    elif '__TableColumn__' in o:
+        d = TableColumn()
+        d.__dict__.update(o['__TableColumn__'])
+        return d
+    elif '__SqlaTable__' in o:
+        d = SqlaTable()
+        d.__dict__.update(o['__SqlaTable__'])
+        return d
+    elif '__SqlMetric__' in o:
+        d = SqlMetric()
+        d.__dict__.update(o['__SqlMetric__'])
+        return d
+    elif '__datetime__' in o:
+        return datetime.strptime(o['__datetime__'], '%Y-%m-%dT%H:%M:%S')
+    else:
+        return o
+
+
+class DashboardEncoder(json.JSONEncoder):
+    # pylint: disable=E0202
+    def default(self, o):
+        try:
+            vals = {
+                k: v for k, v in o.__dict__.items() if k != '_sa_instance_state'}
+            return {'__{}__'.format(o.__class__.__name__): vals}
+        except Exception:
+            if type(o) == datetime:
+                return {'__datetime__': o.replace(microsecond=0).isoformat()}
+            return json.JSONEncoder.default(self, o)
+
+
 def parse_human_timedelta(s):
     """
     Returns ``datetime.datetime`` from natural language time deltas
@@ -279,7 +330,7 @@ def base_json_conv(obj):
         return str(obj)
 
 
-def json_iso_dttm_ser(obj):
+def json_iso_dttm_ser(obj, pessimistic=False):
     """
     json serializer that deals with dates
 
@@ -290,16 +341,22 @@ def json_iso_dttm_ser(obj):
     val = base_json_conv(obj)
     if val is not None:
         return val
-    if isinstance(obj, datetime):
-        obj = obj.isoformat()
-    elif isinstance(obj, date):
-        obj = obj.isoformat()
-    elif isinstance(obj, time):
+    if isinstance(obj, (datetime, date, time, pd.Timestamp)):
         obj = obj.isoformat()
     else:
-        raise TypeError(
-            'Unserializable object {} of type {}'.format(obj, type(obj)))
+        if pessimistic:
+            return 'Unserializable [{}]'.format(type(obj))
+        else:
+            raise TypeError(
+                'Unserializable object {} of type {}'.format(obj, type(obj)))
     return obj
+
+
+def pessimistic_json_iso_dttm_ser(obj):
+    """Proxy to call json_iso_dttm_ser in a pessimistic way
+
+    If one of object is not serializable to json, it will still succeed"""
+    return json_iso_dttm_ser(obj, pessimistic=True)
 
 
 def datetime_to_epoch(dttm):
@@ -318,7 +375,7 @@ def json_int_dttm_ser(obj):
     val = base_json_conv(obj)
     if val is not None:
         return val
-    if isinstance(obj, datetime):
+    if isinstance(obj, (datetime, pd.Timestamp)):
         obj = datetime_to_epoch(obj)
     elif isinstance(obj, date):
         obj = (obj - EPOCH.date()).total_seconds() * 1000
@@ -356,11 +413,18 @@ def error_msg_from_exception(e):
 
 
 def markdown(s, markup_wrap=False):
+    safe_markdown_tags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'b', 'i',
+                          'strong', 'em', 'tt', 'p', 'br', 'span',
+                          'div', 'blockquote', 'code', 'hr', 'ul', 'ol',
+                          'li', 'dd', 'dt', 'img', 'a']
+    safe_markdown_attrs = {'img': ['src', 'alt', 'title'],
+                           'a': ['href', 'alt', 'title']}
     s = md.markdown(s or '', [
         'markdown.extensions.tables',
         'markdown.extensions.fenced_code',
         'markdown.extensions.codehilite',
     ])
+    s = bleach.clean(s, safe_markdown_tags, safe_markdown_attrs)
     if markup_wrap:
         s = Markup(s)
     return s
@@ -631,7 +695,7 @@ def has_access(f):
         return redirect(
             url_for(
                 self.appbuilder.sm.auth_view.__class__.__name__ + '.login',
-                next=request.path))
+                next=request.full_path))
 
     f._permission_name = permission_str
     return functools.update_wrapper(wraps, f)
@@ -715,7 +779,8 @@ def merge_extra_filters(form_data):
             return f['col'] + '__' + f['op']
         existing_filters = {}
         for existing in form_data['filters']:
-            existing_filters[get_filter_key(existing)] = existing['val']
+            if existing['col'] is not None:
+                existing_filters[get_filter_key(existing)] = existing['val']
         for filtr in form_data['extra_filters']:
             # Pull out time filters/options and merge into form data
             if date_options.get(filtr['col']):
@@ -746,3 +811,17 @@ def merge_extra_filters(form_data):
                     form_data['filters'] += [filtr]
         # Remove extra filters from the form data since no longer needed
         del form_data['extra_filters']
+
+
+def merge_request_params(form_data, params):
+    url_params = {}
+    for key, value in params.items():
+        if key in ('form_data', 'r'):
+            continue
+        url_params[key] = value
+    form_data['url_params'] = url_params
+
+
+def get_update_perms_flag():
+    val = os.environ.get('SUPERSET_UPDATE_PERMS')
+    return val.lower() not in ('0', 'false', 'no') if val else True

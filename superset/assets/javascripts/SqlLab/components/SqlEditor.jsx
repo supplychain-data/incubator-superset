@@ -1,5 +1,6 @@
 import React from 'react';
 import PropTypes from 'prop-types';
+import throttle from 'lodash.throttle';
 import {
   Col,
   FormGroup,
@@ -15,8 +16,10 @@ import {
 import SplitPane from 'react-split-pane';
 
 import Button from '../../components/Button';
+import TemplateParamsEditor from './TemplateParamsEditor';
 import SouthPane from './SouthPane';
 import SaveQuery from './SaveQuery';
+import ShareQuery from './ShareQuery';
 import Timer from '../../components/Timer';
 import SqlEditorLeftBar from './SqlEditorLeftBar';
 import AceEditorWrapper from './AceEditorWrapper';
@@ -24,9 +27,10 @@ import { STATE_BSSTYLE_MAP } from '../constants';
 import RunQueryActionButton from './RunQueryActionButton';
 import { t } from '../../locales';
 
+
 const propTypes = {
   actions: PropTypes.object.isRequired,
-  height: PropTypes.string.isRequired,
+  getHeight: PropTypes.func.isRequired,
   database: PropTypes.object,
   latestQuery: PropTypes.object,
   tables: PropTypes.array.isRequired,
@@ -50,6 +54,9 @@ class SqlEditor extends React.PureComponent {
       autorun: props.queryEditor.autorun,
       ctas: '',
     };
+
+    this.onResize = this.onResize.bind(this);
+    this.throttledResize = throttle(this.onResize, 250);
   }
   componentWillMount() {
     if (this.state.autorun) {
@@ -60,12 +67,18 @@ class SqlEditor extends React.PureComponent {
   }
   componentDidMount() {
     this.onResize();
+    window.addEventListener('resize', this.throttledResize);
+  }
+  componentWillUnmount() {
+    window.removeEventListener('resize', this.throttledResize);
   }
   onResize() {
     const height = this.sqlEditorHeight();
+    const editorPaneHeight = this.props.queryEditor.height || 200;
+    const splitPaneHandlerHeight = 15;
     this.setState({
-      editorPaneHeight: this.refs.ace.clientHeight,
-      southPaneHeight: height - this.refs.ace.clientHeight,
+      editorPaneHeight,
+      southPaneHeight: height - editorPaneHeight - splitPaneHandlerHeight,
       height,
     });
 
@@ -95,6 +108,7 @@ class SqlEditor extends React.PureComponent {
       tab: qe.title,
       schema: qe.schema,
       tempTableName: ctas ? this.state.ctas : '',
+      templateParams: qe.templateParams,
       runAsync,
       ctas,
     };
@@ -111,11 +125,8 @@ class SqlEditor extends React.PureComponent {
     this.setState({ ctas: event.target.value });
   }
   sqlEditorHeight() {
-    // quick hack to make the white bg of the tab stretch full height.
-    const tabNavHeight = 40;
-    const navBarHeight = 56;
-    const mysteryVerticalHeight = 50;
-    return window.innerHeight - tabNavHeight - navBarHeight - mysteryVerticalHeight;
+    const horizontalScrollbarHeight = 25;
+    return parseInt(this.props.getHeight(), 10) - horizontalScrollbarHeight;
   }
   renderEditorBottomBar() {
     let ctasControls;
@@ -185,10 +196,20 @@ class SqlEditor extends React.PureComponent {
                 dbId={qe.dbId}
               />
             </span>
+            <span className="m-r-5">
+              <ShareQuery queryEditor={qe} />
+            </span>
             {ctasControls}
           </Form>
         </div>
         <div className="pull-right">
+          <TemplateParamsEditor
+            language="json"
+            onChange={(params) => {
+              this.props.actions.queryEditorSetTemplateParams(qe, params);
+            }}
+            code={qe.templateParams}
+          />
           {limitWarning}
           {this.props.latestQuery &&
             <Timer
@@ -209,8 +230,7 @@ class SqlEditor extends React.PureComponent {
       <div
         className="SqlEditor"
         style={{
-          minHeight: height,
-          height: this.props.height,
+          height: height + 'px',
         }}
       >
         <Row>
@@ -225,6 +245,7 @@ class SqlEditor extends React.PureComponent {
             >
               <SqlEditorLeftBar
                 height={height}
+                database={this.props.database}
                 queryEditor={this.props.queryEditor}
                 tables={this.props.tables}
                 actions={this.props.actions}
@@ -242,7 +263,7 @@ class SqlEditor extends React.PureComponent {
               split="horizontal"
               defaultSize={defaultNorthHeight}
               minSize={100}
-              onChange={this.onResize.bind(this)}
+              onChange={this.onResize}
             >
               <div ref="ace" style={{ width: '100%' }}>
                 <div>
@@ -253,7 +274,7 @@ class SqlEditor extends React.PureComponent {
                     onAltEnter={this.runQuery.bind(this)}
                     sql={this.props.queryEditor.sql}
                     tables={this.props.tables}
-                    height={((this.state.editorPaneHeight || defaultNorthHeight) - 50).toString()}
+                    height={((this.state.editorPaneHeight || defaultNorthHeight) - 50) + 'px'}
                   />
                   {this.renderEditorBottomBar()}
                 </div>
@@ -263,7 +284,7 @@ class SqlEditor extends React.PureComponent {
                   editorQueries={this.props.editorQueries}
                   dataPreviewQueries={this.props.dataPreviewQueries}
                   actions={this.props.actions}
-                  height={this.state.southPaneHeight}
+                  height={this.state.southPaneHeight || 0}
                 />
               </div>
             </SplitPane>

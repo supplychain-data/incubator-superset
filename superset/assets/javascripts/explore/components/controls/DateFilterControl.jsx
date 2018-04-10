@@ -69,9 +69,8 @@ export default class DateFilterControl extends React.Component {
   setType(type) {
     this.setState({ type });
   }
-  setValue(val) {
-    this.setState({ type: 'free', free: val });
-    this.close();
+  setValueAndClose(val) {
+    this.setState({ type: 'free', free: val }, this.close);
   }
   setDatetime(dttm) {
     this.setState({ dttm: dttm.format().substring(0, 19) });
@@ -91,7 +90,7 @@ export default class DateFilterControl extends React.Component {
   renderPopover() {
     return (
       <Popover id="filter-popover">
-        <div style={{ width: '240px' }}>
+        <div style={{ width: '250px' }}>
           <PopoverSection
             title="Fixed"
             isSelected={this.state.type === 'fix'}
@@ -175,13 +174,15 @@ export default class DateFilterControl extends React.Component {
             >
               <Button
                 bsSize="small"
-                onClick={this.setValue.bind(this, 'now')}
+                className="now"
+                onClick={this.setValueAndClose.bind(this, 'now')}
               >
                 now
               </Button>
               <Button
                 bsSize="small"
-                onClick={this.setValue.bind(this, '')}
+                className="clear"
+                onClick={this.setValueAndClose.bind(this, '')}
               >
                 clear
               </Button>

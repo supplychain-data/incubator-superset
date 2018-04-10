@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Package's main module!"""
 from __future__ import absolute_import
 from __future__ import division
@@ -12,6 +13,7 @@ import os
 from flask import Flask, redirect
 from flask_appbuilder import AppBuilder, IndexView, SQLA
 from flask_appbuilder.baseviews import expose
+from flask_compress import Compress
 from flask_migrate import Migrate
 from flask_wtf.csrf import CSRFProtect
 from werkzeug.contrib.fixers import ProxyFix
@@ -21,6 +23,9 @@ from superset import utils, config  # noqa
 
 APP_DIR = os.path.dirname(__file__)
 CONFIG_MODULE = os.environ.get('SUPERSET_CONFIG', 'superset.config')
+
+if not os.path.exists(config.DATA_DIR):
+    os.makedirs(config.DATA_DIR)
 
 with open(APP_DIR + '/static/assets/backendSync.json', 'r') as f:
     frontend_config = json.load(f)
@@ -42,7 +47,7 @@ def parse_manifest_json():
         with open(MANIFEST_FILE, 'r') as f:
             manifest = json.load(f)
     except Exception:
-        print('no manifest file found at ' + MANIFEST_FILE)
+        pass
 
 
 def get_manifest_file(filename):
@@ -149,7 +154,9 @@ appbuilder = AppBuilder(
     db.session,
     base_template='superset/base.html',
     indexview=MyIndexView,
-    security_manager_class=app.config.get('CUSTOM_SECURITY_MANAGER'))
+    security_manager_class=app.config.get('CUSTOM_SECURITY_MANAGER'),
+    update_perms=utils.get_update_perms_flag(),
+)
 
 sm = appbuilder.sm
 
@@ -159,6 +166,10 @@ results_backend = app.config.get('RESULTS_BACKEND')
 module_datasource_map = app.config.get('DEFAULT_MODULE_DS_MAP')
 module_datasource_map.update(app.config.get('ADDITIONAL_MODULE_DS_MAP'))
 ConnectorRegistry.register_sources(module_datasource_map)
+
+# Flask-Compress
+if conf.get('ENABLE_FLASK_COMPRESS'):
+    Compress(app)
 
 # Hook that provides administrators a handle on the Flask APP
 # after initialization

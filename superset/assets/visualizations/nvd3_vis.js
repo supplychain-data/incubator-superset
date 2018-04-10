@@ -3,17 +3,26 @@ import $ from 'jquery';
 import throttle from 'lodash.throttle';
 import d3 from 'd3';
 import nv from 'nvd3';
+import mathjs from 'mathjs';
+import moment from 'moment';
 import d3tip from 'd3-tip';
 
 import { getColorFromScheme } from '../javascripts/modules/colors';
+import AnnotationTypes, {
+  applyNativeColumns,
+} from '../javascripts/modules/AnnotationTypes';
 import { customizeToolTip, d3TimeFormatPreset, d3FormatPreset, tryNumify } from '../javascripts/modules/utils';
 
 // CSS
 import '../node_modules/nvd3/build/nv.d3.min.css';
 import './nvd3_vis.css';
+import { VIZ_TYPES } from './main';
 
 const minBarWidth = 15;
+// Limit on how large axes margins can grow as the chart window is resized
+const maxMarginPad = 30;
 const animationTime = 1000;
+const minHeightForBrush = 480;
 
 const BREAKPOINTS = {
   small: 340,
@@ -150,9 +159,14 @@ function nvd3Vis(slice, payload) {
     if (svg.empty()) {
       svg = d3.select(slice.selector).append('svg');
     }
+    let height = slice.height();
     switch (vizType) {
       case 'line':
-        if (fd.show_brush) {
+        if (
+          fd.show_brush === true ||
+          fd.show_brush === 'yes' ||
+          (fd.show_brush === 'auto' && height >= minHeightForBrush)
+        ) {
           chart = nv.models.lineWithFocusChart();
           chart.focus.xScale(d3.time.scale.utc());
           chart.x2Axis.staggerLabels(false);
@@ -324,7 +338,6 @@ function nvd3Vis(slice, payload) {
       }
     }
 
-    let height = slice.height();
     if (vizType === 'bullet') {
       height = Math.min(height, 50);
     }
@@ -392,7 +405,7 @@ function nvd3Vis(slice, payload) {
         return `rgba(${c.r}, ${c.g}, ${c.b}, ${alpha})`;
       });
     } else if (vizType !== 'bullet') {
-      chart.color(d => getColorFromScheme(d[colorKey], fd.color_scheme));
+      chart.color(d => d.color || getColorFromScheme(d[colorKey], fd.color_scheme));
     }
     if ((vizType === 'line' || vizType === 'area') && fd.rich_tooltip) {
       chart.useInteractiveGuideline(true);
@@ -458,7 +471,9 @@ function nvd3Vis(slice, payload) {
 
     if (chart.yAxis !== undefined || chart.yAxis2 !== undefined) {
       // Hack to adjust y axis left margin to accommodate long numbers
-      const marginPad = isExplore ? width * 0.01 : width * 0.03;
+      const containerWidth = slice.container.width();
+      const marginPad = Math.min(isExplore ? containerWidth * 0.01 : containerWidth * 0.03,
+        maxMarginPad);
       const maxYAxisLabelWidth = chart.yAxis2 ? getMaxLabelSize(slice.container, 'nv-y1')
                                               : getMaxLabelSize(slice.container, 'nv-y');
       const maxXAxisLabelHeight = getMaxLabelSize(slice.container, 'nv-x');
@@ -526,82 +541,230 @@ function nvd3Vis(slice, payload) {
       .attr('width', width)
       .call(chart);
 
-      // add annotation_layer
-      if (isTimeSeries && payload.annotations && payload.annotations.length) {
-        const tip = d3tip()
-          .attr('class', 'd3-tip')
-          .direction('n')
-          .offset([-5, 0])
-          .html((d) => {
-            if (!d || !d.layer) {
-              return '';
-            }
+      // on scroll, hide tooltips. throttle to only 4x/second.
+      $(window).scroll(throttle(hideTooltips, 250));
 
-            const title = d.short_descr ?
-              d.short_descr + ' - ' + d.layer :
-              d.layer;
-            const body = d.long_descr;
-            return '<div><strong>' + title + '</strong></div><br/>' +
-            '<div>' + body + '</div>';
-          });
+      const annotationLayers = (slice.formData.annotation_layers || []).filter(x => x.show);
 
-        const hh = chart.yAxis.scale().range()[0];
+      if (isTimeSeries && annotationLayers) {
+        // Formula annotations
+        const formulas = annotationLayers.filter(a => a.annotationType === AnnotationTypes.FORMULA)
+          .map(a => ({ ...a, formula: mathjs.parse(a.value) }));
 
-        let annotationLayer;
+        let xMax;
+        let xMin;
         let xScale;
-        let minStep;
-        if (vizType === 'bar') {
-          const xMax = d3.max(payload.data[0].values, d => (d.x));
-          const xMin = d3.min(payload.data[0].values, d => (d.x));
-          minStep = chart.xAxis.range()[1] - chart.xAxis.range()[0];
-          annotationLayer = svg.select('.nv-barsWrap')
-            .insert('g', ':first-child');
+        if (vizType === VIZ_TYPES.bar) {
+          xMin = d3.min(data[0].values, d => (d.x));
+          xMax = d3.max(data[0].values, d => (d.x));
           xScale = d3.scale.quantile()
             .domain([xMin, xMax])
             .range(chart.xAxis.range());
         } else {
-          minStep = 1;
-          annotationLayer = svg.select('.nv-background')
-            .append('g');
-          xScale = chart.xScale();
+          xMin = chart.xAxis.scale().domain()[0].valueOf();
+          xMax = chart.xAxis.scale().domain()[1].valueOf();
+          xScale = chart.xScale ? chart.xScale() : d3.scale.linear();
         }
 
-        annotationLayer
-          .attr('class', 'annotation-container')
-          .append('defs')
-          .append('pattern')
-          .attr('id', 'diagonal')
-          .attr('patternUnits', 'userSpaceOnUse')
-          .attr('width', 8)
-          .attr('height', 10)
-          .attr('patternTransform', 'rotate(45 50 50)')
-          .append('line')
-          .attr('stroke-width', 7)
-          .attr('y2', 10);
+        if (Array.isArray(formulas) && formulas.length) {
+          const xValues = [];
+          if (vizType === VIZ_TYPES.bar) {
+            // For bar-charts we want one data point evaluated for every
+            // data point that will be displayed.
+            const distinct = data.reduce((xVals, d) => {
+              d.values.forEach(x => xVals.add(x.x));
+              return xVals;
+            }, new Set());
+            xValues.push(...distinct.values());
+            xValues.sort();
+          } else {
+            // For every other time visualization it should be ok, to have a
+            // data points in even intervals.
+            let period = Math.min(...data.map(d =>
+              Math.min(...d.values.slice(1).map((v, i) => v.x - d.values[i].x))));
+            const dataPoints = (xMax - xMin) / (period || 1);
+            // make sure that there are enough data points and not too many
+            period = dataPoints < 100 ? (xMax - xMin) / 100 : period;
+            period = dataPoints > 500 ? (xMax - xMin) / 500 : period;
+            xValues.push(xMin);
+            for (let x = xMin; x < xMax; x += period) {
+              xValues.push(x);
+            }
+            xValues.push(xMax);
+          }
+          const formulaData = formulas.map(fo => ({
+            key: fo.name,
+            values: xValues.map((x => ({ y: fo.formula.eval({ x }), x }))),
+            color: fo.color,
+            strokeWidth: fo.width,
+            classed: `${fo.opacity} ${fo.style}`,
+          }));
+          data.push(...formulaData);
+        }
+        const yAxis = chart.yAxis1 ? chart.yAxis1 : chart.yAxis;
+        const annotationHeight = yAxis.scale().range()[0];
+        const tipFactory = layer => d3tip()
+          .attr('class', 'd3-tip')
+          .direction('n')
+          .offset([-5, 0])
+          .html((d) => {
+            if (!d) {
+              return '';
+            }
+            const title = d[layer.titleColumn] && d[layer.titleColumn].length ?
+              d[layer.titleColumn] + ' - ' + layer.name :
+              layer.name;
+            const body = Array.isArray(layer.descriptionColumns) ?
+              layer.descriptionColumns.map(c => d[c]) : Object.values(d);
+            return '<div><strong>' + title + '</strong></div><br/>' +
+              '<div>' + body.join(', ') + '</div>';
+          });
 
-        annotationLayer.selectAll('rect')
-          .data(payload.annotations)
-          .enter()
-          .append('rect')
-          .attr('class', 'annotation')
-          .attr('x', d => (xScale(d.start_dttm)))
-          .attr('y', 0)
-          .attr('width', (d) => {
-            const w = xScale(d.end_dttm) - xScale(d.start_dttm);
-            return w === 0 ? minStep : w;
-          })
-          .attr('height', hh)
-          .attr('fill', 'url(#diagonal)')
-          .on('mouseover', tip.show)
-          .on('mouseout', tip.hide);
+        if (slice.annotationData && Object.keys(slice.annotationData).length) {
+          // Event annotations
+          annotationLayers.filter(x => (
+            x.annotationType === AnnotationTypes.EVENT &&
+            slice.annotationData && slice.annotationData[x.name]
+          )).forEach((config, index) => {
+            const e = applyNativeColumns(config);
+            // Add event annotation layer
+            const annotations = d3.select(slice.selector).select('.nv-wrap').append('g')
+              .attr('class', `nv-event-annotation-layer-${index}`);
+            const aColor = e.color || getColorFromScheme(e.name, fd.color_scheme);
 
-        annotationLayer.selectAll('rect').call(tip);
+            const tip = tipFactory(e);
+            const records = (slice.annotationData[e.name].records || []).map((r) => {
+              const timeValue = new Date(moment.utc(r[e.timeColumn]));
+
+              return {
+                ...r,
+                [e.timeColumn]: timeValue,
+              };
+            }).filter(record => !Number.isNaN(record[e.timeColumn].getMilliseconds()));
+
+            // account for the annotation in the x domain
+            records.forEach((record) => {
+              const timeValue = record[e.timeColumn];
+
+              xMin = Math.min(...[xMin, timeValue]);
+              xMax = Math.max(...[xMax, timeValue]);
+            });
+
+            if (records.length) {
+              const domain = [xMin, xMax];
+              xScale.domain(domain);
+              chart.xDomain(domain);
+
+              annotations.selectAll('line')
+                .data(records)
+                .enter()
+                .append('line')
+                .attr({
+                  x1: d => xScale(new Date(d[e.timeColumn])),
+                  y1: 0,
+                  x2: d => xScale(new Date(d[e.timeColumn])),
+                  y2: annotationHeight,
+                })
+                .attr('class', `${e.opacity} ${e.style}`)
+                .style('stroke', aColor)
+                .style('stroke-width', e.width)
+                .on('mouseover', tip.show)
+                .on('mouseout', tip.hide)
+                .call(tip);
+            }
+          });
+
+
+          // Interval annotations
+          annotationLayers.filter(x => (
+            x.annotationType === AnnotationTypes.INTERVAL &&
+            slice.annotationData && slice.annotationData[x.name]
+          )).forEach((config, index) => {
+            const e = applyNativeColumns(config);
+            // Add interval annotation layer
+            const annotations = d3.select(slice.selector).select('.nv-wrap').append('g')
+              .attr('class', `nv-interval-annotation-layer-${index}`);
+
+            const aColor = e.color || getColorFromScheme(e.name, fd.color_scheme);
+            const tip = tipFactory(e);
+
+            const records = (slice.annotationData[e.name].records || []).map((r) => {
+              const timeValue = new Date(moment.utc(r[e.timeColumn]));
+              const intervalEndValue = new Date(moment.utc(r[e.intervalEndColumn]));
+              return {
+                ...r,
+                [e.timeColumn]: timeValue,
+                [e.intervalEndColumn]: intervalEndValue,
+              };
+            }).filter(record => (
+              !Number.isNaN(record[e.timeColumn].getMilliseconds()) &&
+              !Number.isNaN(record[e.intervalEndColumn].getMilliseconds())
+            ));
+
+            // account for the annotation in the x domain
+            records.forEach((record) => {
+              const timeValue = record[e.timeColumn];
+              const intervalEndValue = record[e.intervalEndColumn];
+
+              xMin = Math.min(...[xMin, timeValue, intervalEndValue]);
+              xMax = Math.max(...[xMax, timeValue, intervalEndValue]);
+            });
+
+            if (records.length) {
+              const domain = [xMin, xMax];
+              xScale.domain(domain);
+              chart.xDomain(domain);
+
+              annotations.selectAll('rect')
+                .data(records)
+                .enter()
+                .append('rect')
+                .attr({
+                  x: d => Math.min(xScale(new Date(d[e.timeColumn])),
+                    xScale(new Date(d[e.intervalEndColumn]))),
+                  y: 0,
+                  width: d => Math.max(Math.abs(xScale(new Date(d[e.intervalEndColumn])) -
+                    xScale(new Date(d[e.timeColumn]))), 1),
+                  height: annotationHeight,
+                })
+                .attr('class', `${e.opacity} ${e.style}`)
+                .style('stroke-width', e.width)
+                .style('stroke', aColor)
+                .style('fill', aColor)
+                .style('fill-opacity', 0.2)
+                .on('mouseover', tip.show)
+                .on('mouseout', tip.hide)
+                .call(tip);
+            }
+          });
+
+          // Time series annotations
+          const timeSeriesAnnotations = annotationLayers
+            .filter(a => a.annotationType === AnnotationTypes.TIME_SERIES).reduce((bushel, a) =>
+              bushel.concat((slice.annotationData[a.name] || []).map((series) => {
+                if (!series) {
+                  return {};
+                }
+                const key = Array.isArray(series.key) ?
+                  `${a.name}, ${series.key.join(', ')}` : a.name;
+                return {
+                  ...series,
+                  key,
+                  color: a.color,
+                  strokeWidth: a.width,
+                  classed: `${a.opacity} ${a.style}`,
+                };
+              })), []);
+          data.push(...timeSeriesAnnotations);
+        }
       }
+
+      // rerender chart
+      svg.datum(data)
+        .attr('height', height)
+        .attr('width', width)
+        .call(chart);
     }
-
-    // on scroll, hide tooltips. throttle to only 4x/second.
-    $(window).scroll(throttle(hideTooltips, 250));
-
     return chart;
   };
 

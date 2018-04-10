@@ -7,6 +7,7 @@ import 'brace/mode/sql';
 import 'brace/mode/json';
 import 'brace/mode/html';
 import 'brace/mode/markdown';
+import 'brace/mode/javascript';
 
 import 'brace/theme/textmate';
 
@@ -16,20 +17,25 @@ import { t } from '../../../locales';
 
 const propTypes = {
   name: PropTypes.string.isRequired,
-  label: PropTypes.string,
-  description: PropTypes.string,
   onChange: PropTypes.func,
   value: PropTypes.string,
   height: PropTypes.number,
-  language: PropTypes.oneOf([null, 'json', 'html', 'sql', 'markdown']),
+  minLines: PropTypes.number,
+  maxLines: PropTypes.number,
+  offerEditInModal: PropTypes.bool,
+  language: PropTypes.oneOf([null, 'json', 'html', 'sql', 'markdown', 'javascript']),
+  aboveEditorSection: PropTypes.node,
+  readOnly: PropTypes.bool,
 };
 
 const defaultProps = {
-  label: null,
-  description: null,
   onChange: () => {},
   value: '',
   height: 250,
+  minLines: 3,
+  maxLines: 10,
+  offerEditInModal: true,
+  readOnly: false,
 };
 
 export default class TextAreaControl extends React.Component {
@@ -46,13 +52,14 @@ export default class TextAreaControl extends React.Component {
           mode={this.props.language}
           theme="textmate"
           style={{ border: '1px solid #CCC' }}
-          minLines={inModal ? 40 : 10}
-          maxLines={inModal ? 1000 : 10}
+          minLines={inModal ? 40 : this.props.minLines}
+          maxLines={inModal ? 1000 : this.props.maxLines}
           onChange={this.onAceChange.bind(this)}
           width="100%"
           editorProps={{ $blockScrolling: true }}
           enableLiveAutocompletion
           value={this.props.value}
+          readOnly={this.props.readOnly}
         />
       );
     }
@@ -63,9 +70,18 @@ export default class TextAreaControl extends React.Component {
           placeholder={t('textarea')}
           onChange={this.onControlChange.bind(this)}
           value={this.props.value}
+          disabled={this.props.readOnly}
           style={{ height: this.props.height }}
         />
       </FormGroup>);
+  }
+  renderModalBody() {
+    return (
+      <div>
+        <div>{this.props.aboveEditorSection}</div>
+        {this.renderEditor(true)}
+      </div>
+    );
   }
   render() {
     const controlHeader = <ControlHeader {...this.props} />;
@@ -73,16 +89,17 @@ export default class TextAreaControl extends React.Component {
       <div>
         {controlHeader}
         {this.renderEditor()}
-        <ModalTrigger
-          bsSize="large"
-          modalTitle={controlHeader}
-          triggerNode={
-            <Button bsSize="small" className="m-t-5">
-              {t('Edit')} <strong>{this.props.language}</strong> {t('in modal')}
-            </Button>
-          }
-          modalBody={this.renderEditor(true)}
-        />
+        {this.props.offerEditInModal &&
+          <ModalTrigger
+            bsSize="large"
+            modalTitle={controlHeader}
+            triggerNode={
+              <Button bsSize="small" className="m-t-5">
+                {t('Edit')} <strong>{this.props.language}</strong> {t('in modal')}
+              </Button>
+            }
+            modalBody={this.renderModalBody(true)}
+          />}
       </div>
     );
   }

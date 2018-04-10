@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Compatibility layer for different database engines
 
 This modules stores logic specific to different database engines. Things
@@ -17,7 +18,6 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 from collections import defaultdict, namedtuple
-import csv
 import inspect
 import logging
 import os
@@ -29,19 +29,23 @@ import boto3
 from flask import g
 from flask_babel import lazy_gettext as _
 import pandas
+import sqlalchemy as sqla
 from sqlalchemy import select
 from sqlalchemy.engine import create_engine
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.sql import text
 import sqlparse
+import unicodecsv
 from werkzeug.utils import secure_filename
 
 from superset import app, cache_util, conf, db, utils
-from superset.utils import QueryStatus, SupersetTemplateException
+from superset.exceptions import SupersetTemplateException
+from superset.utils import QueryStatus
 
 config = app.config
 
 tracking_url_trans = conf.get('TRACKING_URL_TRANSFORMER')
+hive_poll_interval = conf.get('HIVE_POLL_INTERVAL')
 
 Grain = namedtuple('Grain', 'name label function')
 
@@ -62,6 +66,7 @@ class BaseEngineSpec(object):
     time_groupby_inline = False
     limit_method = LimitMethod.FETCH_MANY
     time_secondary_columns = False
+    inner_joins = True
 
     @classmethod
     def fetch_data(cls, cursor, limit):
@@ -132,19 +137,15 @@ class BaseEngineSpec(object):
             'table': table,
             'df': df,
             'name': form.name.data,
-            'con': create_engine(form.con.data, echo=False),
+            'con': create_engine(form.con.data.sqlalchemy_uri_decrypted, echo=False),
             'schema': form.schema.data,
             'if_exists': form.if_exists.data,
             'index': form.index.data,
             'index_label': form.index_label.data,
             'chunksize': 10000,
         }
-        BaseEngineSpec.df_to_db(**df_to_db_kwargs)
 
-    @classmethod
-    def escape_sql(cls, sql):
-        """Escapes the raw SQL"""
-        return sql
+        BaseEngineSpec.df_to_db(**df_to_db_kwargs)
 
     @classmethod
     def convert_dttm(cls, target_type, dttm):
@@ -231,14 +232,15 @@ class BaseEngineSpec(object):
 
     @classmethod
     def select_star(cls, my_db, table_name, schema=None, limit=100,
-                    show_cols=False, indent=True, latest_partition=True):
+                    show_cols=False, indent=True, latest_partition=True,
+                    cols=None):
         fields = '*'
-        cols = []
-        if show_cols or latest_partition:
-            cols = my_db.get_table(table_name, schema=schema).columns
+        cols = cols or []
+        if (show_cols or latest_partition) and not cols:
+            cols = my_db.get_columns(table_name, schema)
 
         if show_cols:
-            fields = [my_db.get_quoter()(c.name) for c in cols]
+            fields = [sqla.column(c.get('name')) for c in cols]
         full_table_name = table_name
         if schema:
             full_table_name = schema + '.' + table_name
@@ -279,19 +281,29 @@ class BaseEngineSpec(object):
         return {}
 
 
-class PostgresEngineSpec(BaseEngineSpec):
-    engine = 'postgresql'
+class PostgresBaseEngineSpec(BaseEngineSpec):
+    """ Abstract class for Postgres 'like' databases """
+
+    engine = ''
 
     time_grains = (
         Grain('Time Column', _('Time Column'), '{col}'),
-        Grain('second', _('second'), "DATE_TRUNC('second', {col})"),
-        Grain('minute', _('minute'), "DATE_TRUNC('minute', {col})"),
-        Grain('hour', _('hour'), "DATE_TRUNC('hour', {col})"),
-        Grain('day', _('day'), "DATE_TRUNC('day', {col})"),
-        Grain('week', _('week'), "DATE_TRUNC('week', {col})"),
-        Grain('month', _('month'), "DATE_TRUNC('month', {col})"),
-        Grain('quarter', _('quarter'), "DATE_TRUNC('quarter', {col})"),
-        Grain('year', _('year'), "DATE_TRUNC('year', {col})"),
+        Grain('second', _('second'),
+              "DATE_TRUNC('second', {col}) AT TIME ZONE 'UTC'"),
+        Grain('minute', _('minute'),
+              "DATE_TRUNC('minute', {col}) AT TIME ZONE 'UTC'"),
+        Grain('hour', _('hour'),
+              "DATE_TRUNC('hour', {col}) AT TIME ZONE 'UTC'"),
+        Grain('day', _('day'),
+              "DATE_TRUNC('day', {col}) AT TIME ZONE 'UTC'"),
+        Grain('week', _('week'),
+              "DATE_TRUNC('week', {col}) AT TIME ZONE 'UTC'"),
+        Grain('month', _('month'),
+              "DATE_TRUNC('month', {col}) AT TIME ZONE 'UTC'"),
+        Grain('quarter', _('quarter'),
+              "DATE_TRUNC('quarter', {col}) AT TIME ZONE 'UTC'"),
+        Grain('year', _('year'),
+              "DATE_TRUNC('year', {col}) AT TIME ZONE 'UTC'"),
     )
 
     @classmethod
@@ -310,12 +322,45 @@ class PostgresEngineSpec(BaseEngineSpec):
     def convert_dttm(cls, target_type, dttm):
         return "'{}'".format(dttm.strftime('%Y-%m-%d %H:%M:%S'))
 
+
+class PostgresEngineSpec(PostgresBaseEngineSpec):
+    engine = 'postgresql'
+
     @classmethod
     def get_table_names(cls, schema, inspector):
         """Need to consider foreign tables for PostgreSQL"""
         tables = inspector.get_table_names(schema)
         tables.extend(inspector.get_foreign_table_names(schema))
         return sorted(tables)
+
+
+class VerticaEngineSpec(PostgresBaseEngineSpec):
+    engine = 'vertica'
+
+
+class RedshiftEngineSpec(PostgresBaseEngineSpec):
+    engine = 'redshift'
+
+
+class OracleEngineSpec(PostgresBaseEngineSpec):
+    engine = 'oracle'
+
+    time_grains = (
+        Grain('Time Column', _('Time Column'), '{col}'),
+        Grain('minute', _('minute'), "TRUNC(TO_DATE({col}), 'MI')"),
+        Grain('hour', _('hour'), "TRUNC(TO_DATE({col}), 'HH')"),
+        Grain('day', _('day'), "TRUNC(TO_DATE({col}), 'DDD')"),
+        Grain('week', _('week'), "TRUNC(TO_DATE({col}), 'WW')"),
+        Grain('month', _('month'), "TRUNC(TO_DATE({col}), 'MONTH')"),
+        Grain('quarter', _('quarter'), "TRUNC(TO_DATE({col}), 'Q')"),
+        Grain('year', _('year'), "TRUNC(TO_DATE({col}), 'YEAR')"),
+    )
+
+    @classmethod
+    def convert_dttm(cls, target_type, dttm):
+        return (
+            """TO_TIMESTAMP('{}', 'YYYY-MM-DD"T"HH24:MI:SS.ff6')"""
+        ).format(dttm.isoformat())
 
 
 class Db2EngineSpec(BaseEngineSpec):
@@ -366,6 +411,8 @@ class SqliteEngineSpec(BaseEngineSpec):
     engine = 'sqlite'
     time_grains = (
         Grain('Time Column', _('Time Column'), '{col}'),
+        Grain('hour', _('hour'),
+              "DATETIME(STRFTIME('%Y-%m-%dT%H:00:00', {col}))"),
         Grain('day', _('day'), 'DATE({col})'),
         Grain('week', _('week'),
               "DATE({col}, -strftime('%w', {col}) || ' days')"),
@@ -493,25 +540,15 @@ class PrestoEngineSpec(BaseEngineSpec):
     )
 
     @classmethod
-    def patch(cls):
-        from pyhive import presto
-        from superset.db_engines import presto as patched_presto
-        presto.Cursor.cancel = patched_presto.cancel
-
-    @classmethod
     def adjust_database_uri(cls, uri, selected_schema=None):
         database = uri.database
-        if selected_schema:
+        if selected_schema and database:
             if '/' in database:
                 database = database.split('/')[0] + '/' + selected_schema
             else:
                 database += '/' + selected_schema
             uri.database = database
         return uri
-
-    @classmethod
-    def escape_sql(cls, sql):
-        return re.sub(r'%%|%', '%%', sql)
 
     @classmethod
     def convert_dttm(cls, target_type, dttm):
@@ -829,7 +866,7 @@ class HiveEngineSpec(PrestoEngineSpec):
         """Uploads a csv file and creates a superset datasource in Hive."""
         def get_column_names(filepath):
             with open(filepath, 'rb') as f:
-                return csv.reader(f).next()
+                return unicodecsv.reader(f, encoding='utf-8-sig').next()
 
         table_name = form.name.data
         filename = form.csv_file.data.filename
@@ -976,7 +1013,7 @@ class HiveEngineSpec(PrestoEngineSpec):
                     last_log_line = len(log_lines)
                 if needs_commit:
                     session.commit()
-            time.sleep(5)
+            time.sleep(hive_poll_interval)
             polled = cursor.poll()
 
     @classmethod
@@ -1072,42 +1109,6 @@ class MssqlEngineSpec(BaseEngineSpec):
     @classmethod
     def convert_dttm(cls, target_type, dttm):
         return "CONVERT(DATETIME, '{}', 126)".format(dttm.isoformat())
-
-
-class RedshiftEngineSpec(PostgresEngineSpec):
-    engine = 'redshift'
-
-
-class OracleEngineSpec(PostgresEngineSpec):
-    engine = 'oracle'
-
-    time_grains = (
-        Grain('Time Column', _('Time Column'), '{col}'),
-        Grain('minute', _('minute'),
-              "TRUNC(TO_DATE({col}), 'MI')"),
-        Grain('hour', _('hour'),
-              "TRUNC(TO_DATE({col}), 'HH')"),
-        Grain('day', _('day'),
-              "TRUNC(TO_DATE({col}), 'DDD')"),
-        Grain('week', _('week'),
-              "TRUNC(TO_DATE({col}), 'WW')"),
-        Grain('month', _('month'),
-              "TRUNC(TO_DATE({col}), 'MONTH')"),
-        Grain('quarter', _('quarter'),
-              "TRUNC(TO_DATE({col}), 'Q')"),
-        Grain('year', _('year'),
-              "TRUNC(TO_DATE({col}), 'YEAR')"),
-    )
-
-    @classmethod
-    def convert_dttm(cls, target_type, dttm):
-        return (
-            """TO_TIMESTAMP('{}', 'YYYY-MM-DD'T'HH24:MI:SS.ff6')"""
-        ).format(dttm.isoformat())
-
-
-class VerticaEngineSpec(PostgresEngineSpec):
-    engine = 'vertica'
 
 
 class AthenaEngineSpec(BaseEngineSpec):
@@ -1215,6 +1216,13 @@ class BQEngineSpec(BaseEngineSpec):
             return "{}'".format(dttm.strftime('%Y-%m-%d'))
         return "'{}'".format(dttm.strftime('%Y-%m-%d %H:%M:%S'))
 
+    @classmethod
+    def fetch_data(cls, cursor, limit):
+        data = super(BQEngineSpec, cls).fetch_data(cursor, limit)
+        if len(data) != 0 and type(data[0]).__name__ == 'Row':
+            data = [r.values() for r in data]
+        return data
+
 
 class ImpalaEngineSpec(BaseEngineSpec):
     """Engine spec for Cloudera's Impala"""
@@ -1244,6 +1252,13 @@ class ImpalaEngineSpec(BaseEngineSpec):
         schemas = [row[0] for row in inspector.engine.execute('SHOW SCHEMAS')
                    if not row[0].startswith('_')]
         return schemas
+
+
+class DruidEngineSpec(BaseEngineSpec):
+    """Engine spec for Druid.io"""
+    engine = 'druid'
+    limit_method = LimitMethod.FETCH_MANY
+    inner_joins = False
 
 
 engines = {

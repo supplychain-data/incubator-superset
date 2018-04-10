@@ -1,10 +1,17 @@
+# -*- coding: utf-8 -*-
 # pylint: disable=invalid-unary-operand-type
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+
 from collections import OrderedDict
 from copy import deepcopy
 from datetime import datetime, timedelta
 import json
 import logging
 from multiprocessing.pool import ThreadPool
+import re
 
 from dateutil.parser import parse as dparse
 from flask import escape, Markup
@@ -28,11 +35,12 @@ from sqlalchemy.orm import backref, relationship
 
 from superset import conf, db, import_util, sm, utils
 from superset.connectors.base.models import BaseColumn, BaseDatasource, BaseMetric
+from superset.exceptions import MetricPermException
 from superset.models.helpers import (
-  AuditMixinNullable, ImportMixin, QueryResult, set_perm,
+    AuditMixinNullable, ImportMixin, QueryResult, set_perm,
 )
 from superset.utils import (
-    DimSelector, DTTM_ALIAS, flasher, MetricPermException,
+    DimSelector, DTTM_ALIAS, flasher,
 )
 
 DRUID_TZ = conf.get('DRUID_TZ')
@@ -91,24 +99,40 @@ class DruidCluster(Model, AuditMixinNullable, ImportMixin):
     def __repr__(self):
         return self.verbose_name if self.verbose_name else self.cluster_name
 
+    def __html__(self):
+        return self.__repr__()
+
+    @property
+    def data(self):
+        return {
+            'name': self.cluster_name,
+            'backend': 'druid',
+        }
+
+    @staticmethod
+    def get_base_url(host, port):
+        if not re.match('http(s)?://', host):
+            host = 'http://' + host
+        return '{0}:{1}'.format(host, port)
+
+    def get_base_coordinator_url(self):
+        base_url = self.get_base_url(
+            self.coordinator_host, self.coordinator_port)
+        return '{base_url}/{self.coordinator_endpoint}'.format(**locals())
+
     def get_pydruid_client(self):
         cli = PyDruid(
-            'http://{0}:{1}/'.format(self.broker_host, self.broker_port),
+            self.get_base_url(self.broker_host, self.broker_port),
             self.broker_endpoint)
         return cli
 
     def get_datasources(self):
-        endpoint = (
-            'http://{obj.coordinator_host}:{obj.coordinator_port}/'
-            '{obj.coordinator_endpoint}/datasources'
-        ).format(obj=self)
-
+        endpoint = self.get_base_coordinator_url() + '/datasources'
         return json.loads(requests.get(endpoint).text)
 
     def get_druid_version(self):
-        endpoint = (
-            'http://{obj.coordinator_host}:{obj.coordinator_port}/status'
-        ).format(obj=self)
+        endpoint = self.get_base_url(
+            self.coordinator_host, self.coordinator_port) + '/status'
         return json.loads(requests.get(endpoint).text)['version']
 
     def refresh_datasources(
@@ -133,16 +157,15 @@ class DruidCluster(Model, AuditMixinNullable, ImportMixin):
 
     def refresh(self, datasource_names, merge_flag, refreshAll):
         """
-        Fetches metadata for the specified datasources andm
+        Fetches metadata for the specified datasources and
         merges to the Superset database
         """
         session = db.session
         ds_list = (
             session.query(DruidDatasource)
-            .filter(or_(DruidDatasource.datasource_name == name
-                    for name in datasource_names))
+            .filter(DruidDatasource.cluster_name == self.cluster_name)
+            .filter(DruidDatasource.datasource_name.in_(datasource_names))
         )
-
         ds_map = {ds.name: ds for ds in ds_list}
         for ds_name in datasource_names:
             datasource = ds_map.get(ds_name, None)
@@ -423,7 +446,7 @@ class DruidDatasource(Model, BaseDatasource):
     __table_args__ = (UniqueConstraint('datasource_name', 'cluster_name'),)
 
     type = 'druid'
-    query_langtage = 'json'
+    query_language = 'json'
     cluster_class = DruidCluster
     metric_class = DruidMetric
     column_class = DruidColumn
@@ -572,11 +595,11 @@ class DruidDatasource(Model, BaseDatasource):
         v1nums = (v1nums + [0, 0, 0])[:3]
         v2nums = (v2nums + [0, 0, 0])[:3]
         return (
-                   v1nums[0] > v2nums[0] or
-                   (v1nums[0] == v2nums[0] and v1nums[1] > v2nums[1]) or
-                   (v1nums[0] == v2nums[0] and v1nums[1] == v2nums[1] and
-                       v1nums[2] > v2nums[2])
-               )
+            v1nums[0] > v2nums[0] or
+            (v1nums[0] == v2nums[0] and v1nums[1] > v2nums[1]) or
+            (v1nums[0] == v2nums[0] and v1nums[1] == v2nums[1] and
+                v1nums[2] > v2nums[2])
+        )
 
     def latest_metadata(self):
         """Returns segment metadata from the latest segment"""
@@ -859,8 +882,8 @@ class DruidDatasource(Model, BaseDatasource):
     def resolve_postagg(postagg, post_aggs, agg_names, visited_postaggs, metrics_dict):
         mconf = postagg.json_obj
         required_fields = set(
-            DruidDatasource.recursive_get_fields(mconf)
-            + mconf.get('fieldNames', []))
+            DruidDatasource.recursive_get_fields(mconf) +
+            mconf.get('fieldNames', []))
         # Check if the fields are already in aggs
         # or is a previous postagg
         required_fields = set([
@@ -988,6 +1011,35 @@ class DruidDatasource(Model, BaseDatasource):
                 dimensions.append(column_name)
         return dimensions
 
+    def intervals_from_dttms(self, from_dttm, to_dttm):
+        # Couldn't find a way to just not filter on time...
+        from_dttm = from_dttm or datetime(1901, 1, 1)
+        to_dttm = to_dttm or datetime(2101, 1, 1)
+
+        # add tzinfo to native datetime with config
+        from_dttm = from_dttm.replace(tzinfo=DRUID_TZ)
+        to_dttm = to_dttm.replace(tzinfo=DRUID_TZ)
+        return '{}/{}'.format(
+            from_dttm.isoformat() if from_dttm else '',
+            to_dttm.isoformat() if to_dttm else '',
+        )
+
+    @staticmethod
+    def _dimensions_to_values(dimensions):
+        """
+        Replace dimensions specs with their `dimension`
+        values, and ignore those without
+        """
+        values = []
+        for dimension in dimensions:
+            if isinstance(dimension, dict):
+                if 'dimension' in dimension:
+                    values.append(dimension['dimension'])
+            else:
+                values.append(dimension)
+
+        return values
+
     def run_query(  # noqa / druid
             self,
             groupby, metrics,
@@ -1001,23 +1053,26 @@ class DruidDatasource(Model, BaseDatasource):
             inner_from_dttm=None, inner_to_dttm=None,
             orderby=None,
             extras=None,  # noqa
-            select=None,  # noqa
-            columns=None, phase=2, client=None, form_data=None,
-            order_desc=True):
+            columns=None, phase=2, client=None,
+            order_desc=True,
+            prequeries=None,
+            is_prequery=False,
+        ):
         """Runs a query against Druid and returns a dataframe.
         """
         # TODO refactor into using a TBD Query object
         client = client or self.cluster.get_pydruid_client()
+        row_limit = row_limit or conf.get('ROW_LIMIT')
 
         if not is_timeseries:
             granularity = 'all'
+
+        if granularity == 'all':
+            phase = 1
         inner_from_dttm = inner_from_dttm or from_dttm
         inner_to_dttm = inner_to_dttm or to_dttm
 
-        # add tzinfo to native datetime with config
-        from_dttm = from_dttm.replace(tzinfo=DRUID_TZ)
-        to_dttm = to_dttm.replace(tzinfo=DRUID_TZ)
-        timezone = from_dttm.tzname()
+        timezone = from_dttm.tzname() if from_dttm else None
 
         query_str = ''
         metrics_dict = {m.metric_name: m for m in self.metrics}
@@ -1043,7 +1098,7 @@ class DruidDatasource(Model, BaseDatasource):
                 origin=extras.get('druid_time_origin'),
             ),
             post_aggregations=post_aggs,
-            intervals=from_dttm.isoformat() + '/' + to_dttm.isoformat(),
+            intervals=self.intervals_from_dttms(from_dttm, to_dttm),
         )
 
         filters = DruidDatasource.get_filters(filter, self.num_cols)
@@ -1056,36 +1111,44 @@ class DruidDatasource(Model, BaseDatasource):
 
         order_direction = 'descending' if order_desc else 'ascending'
 
-        if len(groupby) == 0 and not having_filters:
+        if columns:
+            columns.append('__time')
+            del qry['post_aggregations']
+            del qry['aggregations']
+            qry['dimensions'] = columns
+            qry['metrics'] = []
+            qry['granularity'] = 'all'
+            qry['limit'] = row_limit
+            client.scan(**qry)
+        elif len(groupby) == 0 and not having_filters:
             logging.info('Running timeseries query for no groupby values')
             del qry['dimensions']
             client.timeseries(**qry)
         elif (
-            not having_filters and
-            len(groupby) == 1 and
-            order_desc
+                not having_filters and
+                len(groupby) == 1 and
+                order_desc
         ):
             dim = list(qry.get('dimensions'))[0]
             logging.info('Running two-phase topn query for dimension [{}]'.format(dim))
+            pre_qry = deepcopy(qry)
             if timeseries_limit_metric:
                 order_by = timeseries_limit_metric
+                pre_qry['aggregations'] = self.get_aggregations([timeseries_limit_metric])
             else:
                 order_by = list(qry['aggregations'].keys())[0]
             # Limit on the number of timeseries, doing a two-phases query
-            pre_qry = deepcopy(qry)
             pre_qry['granularity'] = 'all'
             pre_qry['threshold'] = min(row_limit,
                                        timeseries_limit or row_limit)
             pre_qry['metric'] = order_by
-            if isinstance(dim, dict):
-                if 'dimension' in dim:
-                    pre_qry['dimension'] = dim['dimension']
-            else:
-                pre_qry['dimension'] = dim
+            pre_qry['dimension'] = self._dimensions_to_values(qry.get('dimensions'))[0]
             del pre_qry['dimensions']
+
             client.topn(**pre_qry)
             logging.info('Phase 1 Complete')
-            query_str += '// Two phase query\n// Phase 1\n'
+            if phase == 2:
+                query_str += '// Two phase query\n// Phase 1\n'
             query_str += json.dumps(
                 client.query_builder.last_query.query_dict, indent=2)
             query_str += '\n'
@@ -1106,39 +1169,34 @@ class DruidDatasource(Model, BaseDatasource):
             qry['metric'] = list(qry['aggregations'].keys())[0]
             client.topn(**qry)
             logging.info('Phase 2 Complete')
-        elif len(groupby) > 0:
+        elif len(groupby) > 0 or having_filters:
             # If grouping on multiple fields or using a having filter
             # we have to force a groupby query
             logging.info('Running groupby query for dimensions [{}]'.format(dimensions))
             if timeseries_limit and is_timeseries:
                 logging.info('Running two-phase query for timeseries')
-                order_by = metrics[0] if metrics else self.metrics[0]
+
+                pre_qry = deepcopy(qry)
+                pre_qry_dims = self._dimensions_to_values(qry['dimensions'])
+                pre_qry['dimensions'] = list(set(pre_qry_dims))
+
+                order_by = metrics[0] if metrics else pre_qry_dims[0]
+
                 if timeseries_limit_metric:
                     order_by = timeseries_limit_metric
+
                 # Limit on the number of timeseries, doing a two-phases query
-                pre_qry = deepcopy(qry)
                 pre_qry['granularity'] = 'all'
                 pre_qry['limit_spec'] = {
                     'type': 'default',
                     'limit': min(timeseries_limit, row_limit),
-                    'intervals': (
-                        inner_from_dttm.isoformat() + '/' +
-                        inner_to_dttm.isoformat()),
+                    'intervals': self.intervals_from_dttms(
+                        inner_from_dttm, inner_to_dttm),
                     'columns': [{
                         'dimension': order_by,
                         'direction': order_direction,
                     }],
                 }
-                pre_qry_dims = []
-                # Replace dimensions specs with their `dimension`
-                # values, and ignore those without
-                for dim in qry['dimensions']:
-                    if isinstance(dim, dict):
-                        if 'dimension' in dim:
-                            pre_qry_dims.append(dim['dimension'])
-                    else:
-                        pre_qry_dims.append(dim)
-                pre_qry['dimensions'] = list(set(pre_qry_dims))
                 client.groupby(**pre_qry)
                 logging.info('Phase 1 Complete')
                 query_str += '// Two phase query\n// Phase 1\n'
@@ -1157,12 +1215,13 @@ class DruidDatasource(Model, BaseDatasource):
                 )
                 qry['limit_spec'] = None
             if row_limit:
+                dimension_values = self._dimensions_to_values(dimensions)
                 qry['limit_spec'] = {
                     'type': 'default',
                     'limit': row_limit,
                     'columns': [{
                         'dimension': (
-                            metrics[0] if metrics else self.metrics[0]),
+                            metrics[0] if metrics else dimension_values[0]),
                         'direction': order_direction,
                     }],
                 }
@@ -1195,8 +1254,11 @@ class DruidDatasource(Model, BaseDatasource):
         cols = []
         if DTTM_ALIAS in df.columns:
             cols += [DTTM_ALIAS]
-        cols += [col for col in query_obj['groupby'] if col in df.columns]
-        cols += [col for col in query_obj['metrics'] if col in df.columns]
+        cols += query_obj.get('groupby') or []
+        cols += query_obj.get('columns') or []
+        cols += query_obj.get('metrics') or []
+
+        cols = [col for col in cols if col in df.columns]
         df = df[cols]
 
         time_offset = DruidDatasource.time_offset(query_obj['granularity'])

@@ -45,6 +45,7 @@
 
 .viztype-label {
   text-align: center;
+  font-size: 12px;
 }
 
 .viztype-selector-container {
@@ -120,4 +121,16 @@
 .color-popover .popover-content {
   padding: 0;
   background-color: transparent;
+}
+
+.type-label {
+  margin-right: 8px;
+  width: 30px;
+  display: inline-block;
+  text-align: center;
+  font-weight: bold;
+}
+
+.datasource-container {
+  overflow: auto;
 }

@@ -1,6 +1,6 @@
 /* global notify */
 import $ from 'jquery';
-import { getExploreUrl } from '../explore/exploreUtils';
+import { getExploreUrlAndPayload } from '../explore/exploreUtils';
 
 export const ADD_FILTER = 'ADD_FILTER';
 export function addFilter(sliceId, col, vals, merge = true, refresh = true) {
@@ -13,8 +13,8 @@ export function clearFilter(sliceId) {
 }
 
 export const REMOVE_FILTER = 'REMOVE_FILTER';
-export function removeFilter(sliceId, col, vals) {
-  return { type: REMOVE_FILTER, sliceId, col, vals };
+export function removeFilter(sliceId, col, vals, refresh = true) {
+  return { type: REMOVE_FILTER, sliceId, col, vals, refresh };
 }
 
 export const UPDATE_DASHBOARD_LAYOUT = 'UPDATE_DASHBOARD_LAYOUT';
@@ -59,10 +59,20 @@ export function saveSlice(slice, sliceName) {
     sliceParams.slice_id = slice.slice_id;
     sliceParams.action = 'overwrite';
     sliceParams.slice_name = sliceName;
-    const saveUrl = getExploreUrl(slice.form_data, 'base', false, null, sliceParams);
+
+    const { url, payload } = getExploreUrlAndPayload({
+      formData: slice.form_data,
+      endpointType: 'base',
+      force: false,
+      curUrl: null,
+      requestParams: sliceParams,
+    });
     return $.ajax({
-      url: saveUrl,
-      type: 'GET',
+      url,
+      type: 'POST',
+      data: {
+        form_data: JSON.stringify(payload),
+      },
       success: () => {
         dispatch(updateSliceName(slice, sliceName));
         notify.success('This slice name was saved successfully.');

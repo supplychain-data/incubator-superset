@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """a collection of Annotation-related models"""
 from __future__ import absolute_import
 from __future__ import division
@@ -48,6 +49,7 @@ class Annotation(Model, AuditMixinNullable):
     @property
     def data(self):
         return {
+            'layer_id': self.layer_id,
             'start_dttm': self.start_dttm,
             'end_dttm': self.end_dttm,
             'short_descr': self.short_descr,

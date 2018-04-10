@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """A collection of ORM sqlalchemy models for Superset"""
 from __future__ import absolute_import
 from __future__ import division
@@ -9,7 +10,6 @@ from datetime import date, datetime
 import functools
 import json
 import logging
-import pickle
 import textwrap
 
 from flask import escape, g, Markup, request
@@ -41,6 +41,7 @@ install_aliases()
 from urllib import parse  # noqa
 
 config = app.config
+custom_password_store = config.get('SQLALCHEMY_CUSTOM_PASSWORD_STORE')
 stats_logger = config.get('STATS_LOGGER')
 metadata = Model.metadata  # pylint: disable=no-member
 
@@ -200,25 +201,30 @@ class Slice(Model, AuditMixinNullable, ImportMixin):
         form_data.update({
             'slice_id': self.id,
             'viz_type': self.viz_type,
-            'datasource': str(self.datasource_id) + '__' + self.datasource_type,
+            'datasource': '{}__{}'.format(
+                self.datasource_id, self.datasource_type),
         })
         if self.cache_timeout:
             form_data['cache_timeout'] = self.cache_timeout
         return form_data
 
+    def get_explore_url(self, base_url='/superset/explore', overrides=None):
+        overrides = overrides or {}
+        form_data = {'slice_id': self.id}
+        form_data.update(overrides)
+        params = parse.quote(json.dumps(form_data))
+        return (
+            '{base_url}/?form_data={params}'.format(**locals()))
+
     @property
     def slice_url(self):
         """Defines the url to access the slice"""
-        return (
-            '/superset/explore/{obj.datasource_type}/'
-            '{obj.datasource_id}/?form_data={params}'.format(
-                obj=self, params=parse.quote(json.dumps(self.form_data))))
+        return self.get_explore_url()
 
     @property
-    def slice_id_url(self):
-        return (
-            '/superset/{slc.datasource_type}/{slc.datasource_id}/{slc.id}/'
-        ).format(slc=self)
+    def explore_json_url(self):
+        """Defines the url to access the slice"""
+        return self.get_explore_url('/superset/explore_json')
 
     @property
     def edit_url(self):
@@ -230,7 +236,7 @@ class Slice(Model, AuditMixinNullable, ImportMixin):
         name = escape(self.slice_name)
         return Markup('<a href="{url}">{name}</a>'.format(**locals()))
 
-    def get_viz(self):
+    def get_viz(self, force=False):
         """Creates :py:class:viz.BaseViz object from the url_params_multidict.
 
         :return: object of the 'viz_type' type that is taken from the
@@ -246,6 +252,7 @@ class Slice(Model, AuditMixinNullable, ImportMixin):
         return viz_types[slice_params.get('viz_type')](
             self.datasource,
             form_data=slice_params,
+            force=force,
         )
 
     @classmethod
@@ -394,7 +401,7 @@ class Dashboard(Model, AuditMixinNullable, ImportMixin):
          be overridden or just copies over. Slices that belong to this
          dashboard will be wired to existing tables. This function can be used
          to import/export dashboards between multiple superset instances.
-         Audit metadata isn't copies over.
+         Audit metadata isn't copied over.
         """
         def alter_positions(dashboard, old_to_new_slc_id_dict):
             """ Updates slice_ids in the position json.
@@ -532,10 +539,10 @@ class Dashboard(Model, AuditMixinNullable, ImportMixin):
                 make_transient(eager_datasource)
                 eager_datasources.append(eager_datasource)
 
-        return pickle.dumps({
+        return json.dumps({
             'dashboards': copied_dashboards,
             'datasources': eager_datasources,
-        })
+        }, cls=utils.DashboardEncoder, indent=4)
 
 
 class Database(Model, AuditMixinNullable, ImportMixin):
@@ -560,6 +567,7 @@ class Database(Model, AuditMixinNullable, ImportMixin):
     allow_ctas = Column(Boolean, default=False)
     allow_dml = Column(Boolean, default=False)
     force_ctas_schema = Column(String(250))
+    allow_multi_schema_metadata_fetch = Column(Boolean, default=True)
     extra = Column(Text, default=textwrap.dedent("""\
     {
         "metadata_params": {},
@@ -567,7 +575,7 @@ class Database(Model, AuditMixinNullable, ImportMixin):
     }
     """))
     perm = Column(String(1000))
-    custom_password_store = config.get('SQLALCHEMY_CUSTOM_PASSWORD_STORE')
+
     impersonate_user = Column(Boolean, default=False)
     export_fields = ('database_name', 'sqlalchemy_uri', 'cache_timeout',
                      'expose_in_sqllab', 'allow_run_sync', 'allow_run_async',
@@ -580,6 +588,15 @@ class Database(Model, AuditMixinNullable, ImportMixin):
     @property
     def name(self):
         return self.verbose_name if self.verbose_name else self.database_name
+
+    @property
+    def data(self):
+        return {
+            'name': self.database_name,
+            'backend': self.backend,
+            'allow_multi_schema_metadata_fetch':
+                self.allow_multi_schema_metadata_fetch,
+        }
 
     @property
     def unique_name(self):
@@ -604,7 +621,7 @@ class Database(Model, AuditMixinNullable, ImportMixin):
 
     def set_sqlalchemy_uri(self, uri):
         conn = sqla.engine.url.make_url(uri.strip())
-        if conn.password != PASSWORD_MASK and not self.custom_password_store:
+        if conn.password != PASSWORD_MASK and not custom_password_store:
             # do not over-write the password with the password mask
             self.password = conn.password
         conn.password = PASSWORD_MASK if conn.password else None
@@ -629,7 +646,9 @@ class Database(Model, AuditMixinNullable, ImportMixin):
                 effective_username = g.user.username
         return effective_username
 
-    def get_sqla_engine(self, schema=None, nullpool=False, user_name=None):
+    @utils.memoized(
+        watch=('impersonate_user', 'sqlalchemy_uri_decrypted', 'extra'))
+    def get_sqla_engine(self, schema=None, nullpool=True, user_name=None):
         extra = self.get_extra()
         url = make_url(self.sqlalchemy_uri_decrypted)
         url = self.db_engine_spec.adjust_database_uri(url, schema)
@@ -659,13 +678,17 @@ class Database(Model, AuditMixinNullable, ImportMixin):
         if configuration:
             params['connect_args'] = {'configuration': configuration}
 
+        DB_CONNECTION_MUTATOR = config.get('DB_CONNECTION_MUTATOR')
+        if DB_CONNECTION_MUTATOR:
+            url, params = DB_CONNECTION_MUTATOR(
+                url, params, effective_username, sm)
         return create_engine(url, **params)
 
     def get_reserved_words(self):
-        return self.get_sqla_engine().dialect.preparer.reserved_words
+        return self.get_dialect().preparer.reserved_words
 
     def get_quoter(self):
-        return self.get_sqla_engine().dialect.identifier_preparer.quote
+        return self.get_dialect().identifier_preparer.quote
 
     def get_df(self, sql, schema):
         sql = sql.strip().strip(';')
@@ -691,11 +714,11 @@ class Database(Model, AuditMixinNullable, ImportMixin):
 
     def select_star(
             self, table_name, schema=None, limit=100, show_cols=False,
-            indent=True, latest_partition=True):
+            indent=True, latest_partition=True, cols=None):
         """Generates a ``select *`` statement in the proper dialect"""
         return self.db_engine_spec.select_star(
             self, table_name, schema=schema, limit=limit, show_cols=show_cols,
-            indent=indent, latest_partition=latest_partition)
+            indent=indent, latest_partition=latest_partition, cols=cols)
 
     def wrap_sql_limit(self, sql, limit=1000):
         qry = (
@@ -717,6 +740,8 @@ class Database(Model, AuditMixinNullable, ImportMixin):
 
     def all_table_names(self, schema=None, force=False):
         if not schema:
+            if not self.allow_multi_schema_metadata_fetch:
+                return []
             tables_dict = self.db_engine_spec.fetch_result_sets(
                 self, 'table', force=force)
             return tables_dict.get('', [])
@@ -725,6 +750,8 @@ class Database(Model, AuditMixinNullable, ImportMixin):
 
     def all_view_names(self, schema=None, force=False):
         if not schema:
+            if not self.allow_multi_schema_metadata_fetch:
+                return []
             views_dict = self.db_engine_spec.fetch_result_sets(
                 self, 'view', force=force)
             return views_dict.get('', [])
@@ -794,8 +821,8 @@ class Database(Model, AuditMixinNullable, ImportMixin):
     @property
     def sqlalchemy_uri_decrypted(self):
         conn = sqla.engine.url.make_url(self.sqlalchemy_uri)
-        if self.custom_password_store:
-            conn.password = self.custom_password_store(conn)
+        if custom_password_store:
+            conn.password = custom_password_store(conn)
         else:
             conn.password = self.password
         return str(conn)
@@ -813,6 +840,7 @@ class Database(Model, AuditMixinNullable, ImportMixin):
         return engine.has_table(
             table.table_name, table.schema or None)
 
+    @utils.memoized
     def get_dialect(self):
         sqla_url = url.make_url(self.sqlalchemy_uri_decrypted)
         return sqla_url.get_dialect()()
@@ -849,9 +877,10 @@ class Log(Model):
             user_id = None
             if g.user:
                 user_id = g.user.get_id()
-            d = request.args.to_dict()
-            post_data = request.form or {}
-            d.update(post_data)
+            d = request.form.to_dict() or {}
+            # request parameters can overwrite post body
+            request_params = request.args.to_dict()
+            d.update(request_params)
             d.update(kwargs)
             slice_id = d.get('slice_id')
 

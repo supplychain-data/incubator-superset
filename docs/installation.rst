@@ -53,6 +53,12 @@ the required dependencies are installed: ::
 
     sudo apt-get install build-essential libssl-dev libffi-dev python-dev python-pip libsasl2-dev libldap2-dev
 
+**Ubuntu 16.04** If you have python3.5 installed alongside with python2.7, as is default on **Ubuntu 16.04 LTS**, run this command also
+
+    sudo apt-get install build-essential libssl-dev libffi-dev python3.5-dev python-pip libsasl2-dev libldap2-dev
+
+otherwhise build for ``cryptography`` fails.
+
 For **Fedora** and **RHEL-derivatives**, the following command will ensure
 that the required dependencies are installed: ::
 
@@ -148,7 +154,7 @@ around `gunicorn`, it doesn't expose all the options you may need,
 so you'll want to craft your own `gunicorn` command in your production
 environment. Here's an **async** setup known to work well: ::
 
-	gunicorn \
+ 　gunicorn \
 		-w 10 \
 		-k gevent \
 		--timeout 120 \
@@ -167,6 +173,30 @@ work on Windows so the `superset runserver` command is not expected to work
 in that context. Also note that the development web
 server (`superset runserver -d`) is not intended for production use.
 
+If not using gunicorn, you may want to disable the use of flask-compress
+by setting `ENABLE_FLASK_COMPRESS = False` in your `superset_config.py`
+
+Flask-AppBuilder Permissions
+----------------------------
+
+By default every time the Flask-AppBuilder (FAB) app is initialized the
+permissions and views are added automatically to the backend and associated with
+the ‘Admin’ role. The issue however is when you are running multiple concurrent
+workers this creates a lot of contention and race conditions when defining
+permissions and views.
+
+To alleviate this issue, the automatic updating of permissions can be disabled
+by setting the :envvar:`SUPERSET_UPDATE_PERMS` environment variable to `0`.
+The value `1` enables it, `0` disables it. Note if undefined the functionality
+is enabled to maintain backwards compatibility.
+
+In a production environment initialization could take on the following form:
+
+  export SUPERSET_UPDATE_PERMS=1
+  superset init
+
+  export SUPERSET_UPDATE_PERMS=0
+  gunicorn -w 10 ... superset:app
 
 Configuration behind a load balancer
 ------------------------------------
@@ -181,11 +211,11 @@ If the load balancer is inserting X-Forwarded-For/X-Forwarded-Proto headers, you
 should set `ENABLE_PROXY_FIX = True` in the superset config file to extract and use
 the headers.
 
-In case that the reverse proxy is used for providing ssl encryption, 
+In case that the reverse proxy is used for providing ssl encryption,
 an explicit definition of the `X-Forwarded-Proto` may be required.
 For the Apache webserver this can be set as follows: ::
 
-    RequestHeader set X-Forwarded-Proto "https"
+　RequestHeader set X-Forwarded-Proto "https"
 
 Configuration
 -------------
@@ -282,6 +312,8 @@ Here's a list of some of the recommended packages.
 |  ClickHouse   | ``pip install                       | ``clickhouse://``                               |
 |               | sqlalchemy-clickhouse``             |                                                 |
 +---------------+-------------------------------------+-------------------------------------------------+
+|  Kylin        | ``pip install kylinpy``             | ``kylin://``                                    |
++---------------+-------------------------------------+-------------------------------------------------+
 
 Note that many other database are supported, the main criteria being the
 existence of a functional SqlAlchemy dialect and Python driver. Googling
@@ -320,6 +352,16 @@ For setting your timeouts, this is done in the Superset metadata and goes
 up the "timeout searchpath", from your slice configuration, to your
 data source's configuration, to your database's and ultimately falls back
 into your global default defined in ``CACHE_CONFIG``.
+	
+.. code-block:: python
+
+    CACHE_CONFIG = {
+	    'CACHE_TYPE': 'redis',
+	    'CACHE_DEFAULT_TIMEOUT': 60 * 60 * 24, # 1 day default (in secs)
+	    'CACHE_KEY_PREFIX': 'superset_results',
+	    'CACHE_REDIS_URL': 'redis://localhost:6379/0',
+	}
+
 
 
 Deeper SQLAlchemy integration
@@ -399,7 +441,7 @@ metadata from your Druid cluster(s)
 
 
 CORS
------
+----
 
 The extra CORS Dependency must be installed:
 
@@ -549,7 +591,7 @@ at the ``/simple_page`` url. This can allow you to run other things such
 as custom data visualization applications alongside Superset, on the
 same server.
 
-..code ::
+.. code-block:: python
 
     from flask import Blueprint
     simple_page = Blueprint('simple_page', __name__,
@@ -570,7 +612,7 @@ are logged as well as key events like query start and end in SQL Lab.
 To setup StatsD logging, it's a matter of configuring the logger in your
 ``superset_config.py``.
 
-..code ::
+.. code-block:: python
 
     from superset.stats_logger import StatsdStatsLogger
     STATS_LOGGER = StatsdStatsLogger(host='localhost', port=8125, prefix='superset')

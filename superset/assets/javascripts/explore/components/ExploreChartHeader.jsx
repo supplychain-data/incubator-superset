@@ -3,12 +3,12 @@ import PropTypes from 'prop-types';
 
 import { chartPropType } from '../../chart/chartReducer';
 import ExploreActionButtons from './ExploreActionButtons';
+import RowCountLabel from './RowCountLabel';
 import EditableTitle from '../../components/EditableTitle';
 import AlteredSliceTag from '../../components/AlteredSliceTag';
 import FaveStar from '../../components/FaveStar';
 import TooltipWrapper from '../../components/TooltipWrapper';
 import Timer from '../../components/Timer';
-import { getExploreUrl } from '../exploreUtils';
 import CachedLabel from '../../components/CachedLabel';
 import { t } from '../../locales';
 
@@ -20,6 +20,7 @@ const CHART_STATUS_MAP = {
 
 const propTypes = {
   actions: PropTypes.object.isRequired,
+  addHistory: PropTypes.func,
   can_overwrite: PropTypes.bool.isRequired,
   can_download: PropTypes.bool.isRequired,
   isStarred: PropTypes.bool.isRequired,
@@ -42,13 +43,13 @@ class ExploreChartHeader extends React.PureComponent {
       slice_name: newTitle,
       action: isNewSlice ? 'saveas' : 'overwrite',
     };
-    const saveUrl = getExploreUrl(this.props.form_data, 'base', false, null, params);
-    this.props.actions.saveSlice(saveUrl)
+    this.props.actions.saveSlice(this.props.form_data, params)
       .then((data) => {
         if (isNewSlice) {
           this.props.actions.createNewSlice(
             data.can_add, data.can_download, data.can_overwrite,
             data.slice, data.form_data);
+          this.props.addHistory({ isReplace: true, title: `[chart] ${data.slice.slice_name}` });
         } else {
           this.props.actions.updateChartTitle(newTitle);
         }
@@ -66,13 +67,14 @@ class ExploreChartHeader extends React.PureComponent {
   }
 
   render() {
-    const queryResponse = this.props.chart.queryResponse;
-    const data = {
-      csv_endpoint: getExploreUrl(this.props.form_data, 'csv'),
-      json_endpoint: getExploreUrl(this.props.form_data, 'json'),
-      standalone_endpoint: getExploreUrl(this.props.form_data, 'standalone'),
-    };
-
+    const formData = this.props.form_data;
+    const {
+      chartStatus,
+      chartUpdateEndTime,
+      chartUpdateStartTime,
+      latestQueryFormData,
+      queryResponse } = this.props.chart;
+    const chartSucceeded = ['success', 'rendered'].indexOf(this.props.chart.chartStatus) > 0;
     return (
       <div
         id="slice-header"
@@ -95,7 +97,7 @@ class ExploreChartHeader extends React.PureComponent {
 
           <TooltipWrapper
             label="edit-desc"
-            tooltip={t('Edit slice properties')}
+            tooltip={t('Edit chart properties')}
           >
             <a
               className="edit-desc-icon"
@@ -109,31 +111,33 @@ class ExploreChartHeader extends React.PureComponent {
         {this.props.chart.sliceFormData &&
           <AlteredSliceTag
             origFormData={this.props.chart.sliceFormData}
-            currentFormData={this.props.form_data}
+            currentFormData={formData}
           />
         }
         <div className="pull-right">
-          {this.props.chart.chartStatus === 'success' &&
-          queryResponse &&
-          queryResponse.is_cached &&
-          <CachedLabel
-            onClick={this.runQuery.bind(this)}
-            cachedTimestamp={queryResponse.cached_dttm}
-          />
-          }
+          {chartSucceeded && queryResponse &&
+            <RowCountLabel
+              rowcount={queryResponse.rowcount}
+              limit={formData.row_limit}
+            />}
+          {chartSucceeded && queryResponse && queryResponse.is_cached &&
+            <CachedLabel
+              onClick={this.runQuery.bind(this)}
+              cachedTimestamp={queryResponse.cached_dttm}
+            />}
           <Timer
-            startTime={this.props.chart.chartUpdateStartTime}
-            endTime={this.props.chart.chartUpdateEndTime}
-            isRunning={this.props.chart.chartStatus === 'loading'}
-            status={CHART_STATUS_MAP[this.props.chart.chartStatus]}
+            startTime={chartUpdateStartTime}
+            endTime={chartUpdateEndTime}
+            isRunning={chartStatus === 'loading'}
+            status={CHART_STATUS_MAP[chartStatus]}
             style={{ fontSize: '10px', marginRight: '5px' }}
           />
           <ExploreActionButtons
-            slice={Object.assign({}, this.props.slice, { data })}
+            slice={this.props.slice}
             canDownload={this.props.can_download}
-            chartStatus={this.props.chart.chartStatus}
+            chartStatus={chartStatus}
+            latestQueryFormData={latestQueryFormData}
             queryResponse={queryResponse}
-            queryEndpoint={getExploreUrl(this.props.form_data, 'query')}
           />
         </div>
       </div>

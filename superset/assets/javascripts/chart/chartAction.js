@@ -1,11 +1,12 @@
-import { getExploreUrl } from '../explore/exploreUtils';
-import { t } from '../locales';
+import { getExploreUrlAndPayload, getAnnotationJsonUrl } from '../explore/exploreUtils';
+import { requiresQuery, ANNOTATION_SOURCE_TYPES } from '../modules/AnnotationTypes';
+import { Logger, LOG_ACTIONS_LOAD_EVENT } from '../logger';
 
 const $ = window.$ = require('jquery');
 
 export const CHART_UPDATE_STARTED = 'CHART_UPDATE_STARTED';
-export function chartUpdateStarted(queryRequest, key) {
-  return { type: CHART_UPDATE_STARTED, queryRequest, key };
+export function chartUpdateStarted(queryRequest, latestQueryFormData, key) {
+  return { type: CHART_UPDATE_STARTED, queryRequest, latestQueryFormData, key };
 }
 
 export const CHART_UPDATE_SUCCEEDED = 'CHART_UPDATE_SUCCEEDED';
@@ -14,10 +15,7 @@ export function chartUpdateSucceeded(queryResponse, key) {
 }
 
 export const CHART_UPDATE_STOPPED = 'CHART_UPDATE_STOPPED';
-export function chartUpdateStopped(queryRequest, key) {
-  if (queryRequest) {
-    queryRequest.abort();
-  }
+export function chartUpdateStopped(key) {
   return { type: CHART_UPDATE_STOPPED, key };
 }
 
@@ -36,9 +34,65 @@ export function chartRenderingFailed(error, key) {
   return { type: CHART_RENDERING_FAILED, error, key };
 }
 
+export const CHART_RENDERING_SUCCEEDED = 'CHART_RENDERING_SUCCEEDED';
+export function chartRenderingSucceeded(key) {
+  return { type: CHART_RENDERING_SUCCEEDED, key };
+}
+
 export const REMOVE_CHART = 'REMOVE_CHART';
 export function removeChart(key) {
   return { type: REMOVE_CHART, key };
+}
+
+export const ANNOTATION_QUERY_SUCCESS = 'ANNOTATION_QUERY_SUCCESS';
+export function annotationQuerySuccess(annotation, queryResponse, key) {
+  return { type: ANNOTATION_QUERY_SUCCESS, annotation, queryResponse, key };
+}
+
+export const ANNOTATION_QUERY_STARTED = 'ANNOTATION_QUERY_STARTED';
+export function annotationQueryStarted(annotation, queryRequest, key) {
+  return { type: ANNOTATION_QUERY_STARTED, annotation, queryRequest, key };
+}
+
+export const ANNOTATION_QUERY_FAILED = 'ANNOTATION_QUERY_FAILED';
+export function annotationQueryFailed(annotation, queryResponse, key) {
+  return { type: ANNOTATION_QUERY_FAILED, annotation, queryResponse, key };
+}
+
+export function runAnnotationQuery(annotation, timeout = 60, formData = null, key) {
+  return function (dispatch, getState) {
+    const sliceKey = key || Object.keys(getState().charts)[0];
+    const fd = formData || getState().charts[sliceKey].latestQueryFormData;
+
+    if (!requiresQuery(annotation.sourceType)) {
+      return Promise.resolve();
+    }
+
+    const sliceFormData = Object.keys(annotation.overrides)
+      .reduce((d, k) => ({
+        ...d,
+        [k]: annotation.overrides[k] || fd[k],
+      }), {});
+    const isNative = annotation.sourceType === ANNOTATION_SOURCE_TYPES.NATIVE;
+    const url = getAnnotationJsonUrl(annotation.value, sliceFormData, isNative);
+    const queryRequest = $.ajax({
+      url,
+      dataType: 'json',
+      timeout: timeout * 1000,
+    });
+    dispatch(annotationQueryStarted(annotation, queryRequest, sliceKey));
+    return queryRequest
+      .then(queryResponse => dispatch(annotationQuerySuccess(annotation, queryResponse, sliceKey)))
+      .catch((err) => {
+        if (err.statusText === 'timeout') {
+          dispatch(annotationQueryFailed(annotation, { error: 'Query Timeout' }, sliceKey));
+        } else if ((err.responseJSON.error || '').toLowerCase().startsWith('no data')) {
+          dispatch(annotationQuerySuccess(annotation, err, sliceKey));
+        } else if (err.statusText !== 'abort') {
+          dispatch(annotationQueryFailed(annotation, err.responseJSON, sliceKey));
+        }
+      });
+  };
 }
 
 export const TRIGGER_QUERY = 'TRIGGER_QUERY';
@@ -52,40 +106,77 @@ export function renderTriggered(value, key) {
   return { type: RENDER_TRIGGERED, value, key };
 }
 
+export const UPDATE_QUERY_FORM_DATA = 'UPDATE_QUERY_FORM_DATA';
+export function updateQueryFormData(value, key) {
+  return { type: UPDATE_QUERY_FORM_DATA, value, key };
+}
+
 export const RUN_QUERY = 'RUN_QUERY';
 export function runQuery(formData, force = false, timeout = 60, key) {
   return (dispatch) => {
-    const url = getExploreUrl(formData, 'json', force);
+    const { url, payload } = getExploreUrlAndPayload({
+      formData,
+      endpointType: 'json',
+      force,
+    });
+    const logStart = Logger.getTimestamp();
     const queryRequest = $.ajax({
+      type: 'POST',
       url,
       dataType: 'json',
+      data: {
+        form_data: JSON.stringify(payload),
+      },
       timeout: timeout * 1000,
-      success: (queryResponse =>
-        dispatch(chartUpdateSucceeded(queryResponse, key))
-      ),
-      error: ((xhr) => {
-        if (xhr.statusText === 'timeout') {
-          dispatch(chartUpdateTimeout(xhr.statusText, timeout, key));
-        } else {
-          let error = '';
-          if (!xhr.responseText) {
-            const status = xhr.status;
-            if (status === 0) {
-              // This may happen when the worker in gunicorn times out
-              error += (
-                t('The server could not be reached. You may want to ' +
-                  'verify your connection and try again.'));
-            } else {
-              error += (t('An unknown error occurred. (Status: %s )', status));
-            }
-          }
-          const errorResponse = Object.assign({}, xhr.responseJSON, error);
-          dispatch(chartUpdateFailed(errorResponse, key));
-        }
-      }),
     });
-
-    dispatch(chartUpdateStarted(queryRequest, key));
-    dispatch(triggerQuery(false, key));
+    const queryPromise = Promise.resolve(dispatch(chartUpdateStarted(queryRequest, payload, key)))
+      .then(() => queryRequest)
+      .then((queryResponse) => {
+        Logger.append(LOG_ACTIONS_LOAD_EVENT, {
+          label: key,
+          is_cached: queryResponse.is_cached,
+          row_count: queryResponse.rowcount,
+          datasource: formData.datasource,
+          start_offset: logStart,
+          duration: Logger.getTimestamp() - logStart,
+        });
+        return dispatch(chartUpdateSucceeded(queryResponse, key));
+      })
+      .catch((err) => {
+        Logger.append(LOG_ACTIONS_LOAD_EVENT, {
+          label: key,
+          has_err: true,
+          datasource: formData.datasource,
+          start_offset: logStart,
+          duration: Logger.getTimestamp() - logStart,
+        });
+        if (err.statusText === 'timeout') {
+          dispatch(chartUpdateTimeout(err.statusText, timeout, key));
+        } else if (err.statusText === 'abort') {
+          dispatch(chartUpdateStopped(key));
+        } else {
+          let errObject;
+          if (err.responseJSON) {
+            errObject = err.responseJSON;
+          } else if (err.stack) {
+            errObject = {
+              error: 'Unexpected error: ' + err.description,
+              stacktrace: err.stack,
+            };
+          } else {
+            errObject = {
+              error: 'Unexpected error.',
+            };
+          }
+          dispatch(chartUpdateFailed(errObject, key));
+        }
+      });
+    const annotationLayers = formData.annotation_layers || [];
+    return Promise.all([
+      queryPromise,
+      dispatch(triggerQuery(false, key)),
+      dispatch(updateQueryFormData(payload, key)),
+      ...annotationLayers.map(x => dispatch(runAnnotationQuery(x, timeout, formData, key))),
+    ]);
   };
 }

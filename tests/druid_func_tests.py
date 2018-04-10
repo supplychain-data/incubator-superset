@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+
 import json
 import unittest
 
@@ -200,7 +206,7 @@ class DruidFuncTestCase(unittest.TestCase):
         client.query_builder.last_query.query_dict = {'mock': 0}
         # client.topn is called twice
         ds.run_query(
-            groupby, metrics, None, from_dttm, to_dttm, row_limit=100,
+            groupby, metrics, None, from_dttm, to_dttm, timeseries_limit=100,
             client=client, order_desc=True, filter=[],
         )
         self.assertEqual(2, len(client.topn.call_args_list))

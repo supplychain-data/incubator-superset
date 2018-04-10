@@ -4,7 +4,10 @@ import PropTypes from 'prop-types';
 import AlertsWrapper from '../../components/AlertsWrapper';
 import GridLayout from './GridLayout';
 import Header from './Header';
+import { exportChart } from '../../explore/exploreUtils';
 import { areObjectsEqual } from '../../reduxUtils';
+import { Logger, ActionLog, LOG_ACTIONS_PAGE_LOAD,
+  LOG_ACTIONS_LOAD_EVENT, LOG_ACTIONS_RENDER_EVENT } from '../../logger';
 import { t } from '../../locales';
 
 import '../../../stylesheets/dashboard.css';
@@ -21,6 +24,7 @@ const propTypes = {
   userId: PropTypes.string,
   isStarred: PropTypes.bool,
   editMode: PropTypes.bool,
+  impressionId: PropTypes.string,
 };
 
 const defaultProps = {
@@ -41,6 +45,14 @@ class Dashboard extends React.PureComponent {
     super(props);
     this.refreshTimer = null;
     this.firstLoad = true;
+    this.loadingLog = new ActionLog({
+      impressionId: props.impressionId,
+      actionType: LOG_ACTIONS_PAGE_LOAD,
+      source: 'dashboard',
+      sourceId: props.dashboard.id,
+      eventNames: [LOG_ACTIONS_LOAD_EVENT, LOG_ACTIONS_RENDER_EVENT],
+    });
+    Logger.start(this.loadingLog);
 
     // alert for unsaved changes
     this.state = { unsavedChanges: false };
@@ -55,6 +67,8 @@ class Dashboard extends React.PureComponent {
     this.addSlicesToDashboard = this.addSlicesToDashboard.bind(this);
     this.fetchSlice = this.fetchSlice.bind(this);
     this.getFormDataExtra = this.getFormDataExtra.bind(this);
+    this.exploreChart = this.exploreChart.bind(this);
+    this.exportCSV = this.exportCSV.bind(this);
     this.props.actions.fetchFaveStar = this.props.actions.fetchFaveStar.bind(this);
     this.props.actions.saveFaveStar = this.props.actions.saveFaveStar.bind(this);
     this.props.actions.saveSlice = this.props.actions.saveSlice.bind(this);
@@ -68,17 +82,35 @@ class Dashboard extends React.PureComponent {
   }
 
   componentDidMount() {
-    this.firstLoad = false;
     window.addEventListener('resize', this.rerenderCharts);
   }
 
+  componentWillReceiveProps(nextProps) {
+    if (this.firstLoad &&
+      Object.values(nextProps.slices)
+        .every(slice => (['rendered', 'failed', 'stopped'].indexOf(slice.chartStatus) > -1))
+    ) {
+      Logger.end(this.loadingLog);
+      this.firstLoad = false;
+    }
+  }
+
   componentDidUpdate(prevProps) {
-    if (!areObjectsEqual(prevProps.filters, this.props.filters) && this.props.refresh) {
-      const currentFilterKeys = Object.keys(this.props.filters);
-      if (currentFilterKeys.length) {
-        currentFilterKeys.forEach(key => (this.refreshExcept(key)));
-      } else {
-        this.refreshExcept();
+    if (this.props.refresh) {
+      let changedFilterKey;
+      const prevFiltersKeySet = new Set(Object.keys(prevProps.filters));
+      Object.keys(this.props.filters).some((key) => {
+        prevFiltersKeySet.delete(key);
+        if (prevProps.filters[key] === undefined ||
+          !areObjectsEqual(prevProps.filters[key], this.props.filters[key])) {
+          changedFilterKey = key;
+          return true;
+        }
+        return false;
+      });
+      // has changed filter or removed a filter?
+      if (!!changedFilterKey || prevFiltersKeySet.size) {
+        this.refreshExcept(changedFilterKey);
       }
     }
   }
@@ -245,6 +277,16 @@ class Dashboard extends React.PureComponent {
     });
   }
 
+  exploreChart(slice) {
+    const formData = this.getFormDataExtra(slice);
+    exportChart(formData);
+  }
+
+  exportCSV(slice) {
+    const formData = this.getFormDataExtra(slice);
+    exportChart(formData, 'csv');
+  }
+
   // re-render chart without fetch
   rerenderCharts() {
     this.getAllSlices().forEach((slice) => {
@@ -287,6 +329,8 @@ class Dashboard extends React.PureComponent {
             timeout={this.props.timeout}
             onChange={this.onChange}
             getFormDataExtra={this.getFormDataExtra}
+            exploreChart={this.exploreChart}
+            exportCSV={this.exportCSV}
             fetchSlice={this.fetchSlice}
             saveSlice={this.props.actions.saveSlice}
             removeSlice={this.props.actions.removeSlice}

@@ -1,5 +1,6 @@
 import { combineReducers } from 'redux';
 import d3 from 'd3';
+import shortid from 'shortid';
 
 import charts, { chart } from '../chart/chartReducer';
 import * as actions from './actions';
@@ -33,21 +34,29 @@ export function getInitialState(bootstrapData) {
 
   dashboard.posDict = {};
   dashboard.layout = [];
-  if (dashboard.position_json) {
+  if (Array.isArray(dashboard.position_json)) {
     dashboard.position_json.forEach((position) => {
       dashboard.posDict[position.slice_id] = position;
     });
+  } else {
+    dashboard.position_json = [];
   }
-  dashboard.slices.forEach((slice, index) => {
+
+  const lastRowId = Math.max(0, Math.max.apply(null,
+    dashboard.position_json.map(pos => (pos.row + pos.size_y))));
+  let newSliceCounter = 0;
+  dashboard.slices.forEach((slice) => {
     const sliceId = slice.slice_id;
     let pos = dashboard.posDict[sliceId];
     if (!pos) {
+      // append new slices to dashboard bottom, 3 slices per row
       pos = {
-        col: (index * 4 + 1) % 12,
-        row: Math.floor((index) / 3) * 4,
-        size_x: 4,
-        size_y: 4,
+        col: (newSliceCounter % 3) * 16 + 1,
+        row: lastRowId + Math.floor(newSliceCounter / 3) * 16,
+        size_x: 16,
+        size_y: 16,
       };
+      newSliceCounter++;
     }
 
     dashboard.layout.push({
@@ -138,27 +147,26 @@ export const dashboard = function (state = {}, action) {
         return state;
       }
 
-      let filters;
+      let filters = state.filters;
       const { sliceId, col, vals, merge, refresh } = action;
       const filterKeys = ['__from', '__to', '__time_col',
         '__time_grain', '__time_origin', '__granularity'];
       if (filterKeys.indexOf(col) >= 0 ||
         selectedSlice.formData.groupby.indexOf(col) !== -1) {
-        if (!(sliceId in state.filters)) {
-          filters = { ...state.filters, [sliceId]: {} };
-        }
-
         let newFilter = {};
-        if (state.filters[sliceId] && !(col in state.filters[sliceId]) || !merge) {
-          newFilter = { ...state.filters[sliceId], [col]: vals };
+        if (!(sliceId in filters)) {
+          // Straight up set the filters if none existed for the slice
+          newFilter = { [col]: vals };
+        } else if (filters[sliceId] && !(col in filters[sliceId]) || !merge) {
+          newFilter = { ...filters[sliceId], [col]: vals };
           // d3.merge pass in array of arrays while some value form filter components
           // from and to filter box require string to be process and return
-        } else if (state.filters[sliceId][col] instanceof Array) {
-          newFilter[col] = d3.merge([state.filters[sliceId][col], vals]);
+        } else if (filters[sliceId][col] instanceof Array) {
+          newFilter[col] = d3.merge([filters[sliceId][col], vals]);
         } else {
-          newFilter[col] = d3.merge([[state.filters[sliceId][col]], vals])[0] || '';
+          newFilter[col] = d3.merge([[filters[sliceId][col]], vals])[0] || '';
         }
-        filters = { ...state.filters, [sliceId]: newFilter };
+        filters = { ...filters, [sliceId]: newFilter };
       }
       return { ...state, filters, refresh };
     },
@@ -168,21 +176,18 @@ export const dashboard = function (state = {}, action) {
       return { ...state, filter: newFilters, refresh: true };
     },
     [actions.REMOVE_FILTER]() {
-      const newFilters = { ...state.filters };
-      const { sliceId, col, vals } = action;
+      const { sliceId, col, vals, refresh } = action;
+      const excluded = new Set(vals);
+      const valFilter = val => !excluded.has(val);
 
-      if (sliceId in state.filters) {
-        if (col in state.filters[sliceId]) {
-          const a = [];
-          newFilters[sliceId][col].forEach(function (v) {
-            if (vals.indexOf(v) < 0) {
-              a.push(v);
-            }
-          });
-          newFilters[sliceId][col] = a;
-        }
+      let filters = state.filters;
+      // Have to be careful not to modify the dashboard state so that
+      // the render actually triggers
+      if (sliceId in state.filters && col in state.filters[sliceId]) {
+        const newFilter = filters[sliceId][col].filter(valFilter);
+        filters = { ...filters, [sliceId]: newFilter };
       }
-      return { ...state, filter: newFilters, refresh: true };
+      return { ...state, filters, refresh };
     },
 
     // slice reducer
@@ -204,4 +209,5 @@ export const dashboard = function (state = {}, action) {
 export default combineReducers({
   charts,
   dashboard,
+  impressionId: () => (shortid.generate()),
 });

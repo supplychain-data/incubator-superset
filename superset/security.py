@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """A set of constants and methods to manage permissions and security"""
 from __future__ import absolute_import
 from __future__ import division
@@ -7,6 +8,7 @@ from __future__ import unicode_literals
 import logging
 
 from flask_appbuilder.security.sqla import models as ab_models
+from sqlalchemy import or_
 
 from superset import conf, db, sm
 from superset.connectors.connector_registry import ConnectorRegistry
@@ -37,6 +39,14 @@ ADMIN_ONLY_VIEW_MENUS = {
     'RoleModelView',
     'Security',
     'UserDBModelView',
+    'UserLDAPModelView',
+    'UserOAuthModelView',
+    'UserOIDModelView',
+    'UserRemoteUserModelView',
+}
+
+ALPHA_ONLY_VIEW_MENUS = {
+    'Upload a CSV',
 }
 
 ADMIN_ONLY_PERMISSIONS = {
@@ -117,7 +127,10 @@ def is_alpha_only(pvm):
     if (pvm.view_menu.name in GAMMA_READ_ONLY_MODEL_VIEWS and
             pvm.permission.name not in READ_ONLY_PERMISSION):
         return True
-    return pvm.permission.name in ALPHA_ONLY_PERMISSIONS
+    return (
+        pvm.view_menu.name in ALPHA_ONLY_VIEW_MENUS or
+        pvm.permission.name in ALPHA_ONLY_PERMISSIONS
+    )
 
 
 def is_admin_pvm(pvm):
@@ -199,6 +212,23 @@ def create_missing_perms():
             merge_pv('metric_access', metric.perm)
 
 
+def clean_perms():
+    """FAB leaves faulty permissions that need to be cleaned up"""
+    logging.info('Cleaning faulty perms')
+    sesh = sm.get_session()
+    pvms = (
+        sesh.query(ab_models.PermissionView)
+        .filter(or_(
+            ab_models.PermissionView.permission == None,  # NOQA
+            ab_models.PermissionView.view_menu == None,  # NOQA
+        ))
+    )
+    deleted_count = pvms.delete()
+    sesh.commit()
+    if deleted_count:
+        logging.info('Deleted {} faulty permissions'.format(deleted_count))
+
+
 def sync_role_definitions():
     """Inits the Superset application with security roles and such"""
     logging.info('Syncing role definition')
@@ -220,3 +250,4 @@ def sync_role_definitions():
 
     # commit role and view menu updates
     sm.get_session.commit()
+    clean_perms()
