@@ -1633,6 +1633,23 @@ export const visTypes = {
       sections.NVD3TimeSeries[1],
     ],
   },
+
+  funnel: {
+    label: t('Funnel'),
+    showOnExplore: true,
+    controlPanelSections: [
+      {
+        label: t('Query'),
+        expanded: true,
+        controlSetRows: [
+          ['metrics'],
+          ['groupby'],
+          ['row_limit'],
+          ['timeseries_limit_metric', 'order_desc'],
+        ],
+      },
+    ],
+  },
 };
 
 export default visTypes;

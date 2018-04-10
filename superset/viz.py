@@ -411,6 +411,41 @@ class BaseViz(object):
         return json.dumps(self.data)
 
 
+class FunnelViz(BaseViz):
+    viz_type = "funnel"
+    verbose_name = _("Funnel View")
+    credits = 'a <a href="https://github.com/airbnb/superset">Superset</a> original'
+    is_timeseries = False
+
+    def query_obj(self):
+        rv = super(FunnelViz, self).query_obj()
+        fd = self.form_data
+
+        if not fd.get("metrics") or len(fd.get("metrics")) != 1 or \
+            not fd.get("groupby") or len(fd.get("groupby")) != 1:
+            raise Exception(_(
+                'Please choose only one groupby and metric'))
+
+        sort_by = fd.get('timeseries_limit_metric')
+        if sort_by:
+            rv['orderby'] = [(sort_by, not fd.get('order_desc', True))]
+        else:
+            rv['orderby'] = [(fd.get("metrics")[0], False)]
+        return rv
+
+
+    def get_data(self, df):
+        fd = self.form_data
+
+        df = df.rename(index=str, columns={fd.get("groupby")[0]: "key", fd.get("metrics")[0]: "value"})
+        max = float(df["value"].max())
+        def get_percent(row):
+            row["percent"] = row["value"] / max
+            return row
+        df = df.apply(get_percent, 1)
+        return df.to_dict(orient="records")
+
+
 class TableViz(BaseViz):
 
     """A basic html table that is sortable and searchable"""
